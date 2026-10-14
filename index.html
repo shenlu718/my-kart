@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>my-kart</title>
+  <style>
+    /* 让画布铺满整个窗口，不留滚动条 */
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!--
+    这一行是整个项目的入口。
+    type="module" 表示这个 js 文件可以用 import 语法引用别的文件。
+    代价：必须通过本地服务器打开，直接双击这个 html 会被浏览器安全策略拦住。
+  -->
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
