@@ -1,0 +1,10 @@
+{
+  "name": "my-kart",
+  "version": "0.1.0",
+  "description": "我的第一个 3D 网页项目，从零学到发布",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "private": true
+}

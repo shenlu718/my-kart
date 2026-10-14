@@ -1,75 +1,110 @@
 // ============================================================================
-//  main.js —— 一个会转的立方体
+//  main.js —— 一个能被键盘开动的方块
 //
-//  所有 3D 网页程序都逃不出这 7 步。看懂这个文件，后面做赛车就是往里面加东西。
+//  和上一版的区别：方块不再自己转，而是听你的键盘。
+//  计算部分全部交给 kart-math.js（那个文件有测试保护），这里只负责
+//  「读键盘」和「把结果画到屏幕上」。
 // ============================================================================
 
-// 从本地 vendor 目录引入 Three.js（不用 CDN，断网也能跑）
 import * as THREE from '../vendor/three/three.module.js';
+import { createKartState, stepKart } from './kart-math.js';
 
 
-// ---------- 第 1 步：建一个"场景"（Scene） ----------
-// 场景就是 3D 世界的容器。所有物体、灯光都要放进它里面，否则看不见。
+// ---------- 1. 场景 ----------
 const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1020);
 
 
-// ---------- 第 2 步：放一台"相机"（Camera） ----------
-// 相机决定"你从哪个位置、哪个角度观察这个世界"。
-// 四个参数：视野角度、宽高比、最近能看清的距离、最远能看到的距离。
+// ---------- 2. 相机 ----------
 const camera = new THREE.PerspectiveCamera(
-  60,                                     // 视野 60 度（越大越像广角镜头）
-  window.innerWidth / window.innerHeight, // 宽高比，跟着窗口走
-  0.1,                                    // 比 0.1 更近的东西看不见
-  100                                     // 比 100 更远的东西看不见
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  200
 );
-camera.position.set(0, 0, 3);             // 相机后退 3 米，否则贴在物体上什么都看不到
 
 
-// ---------- 第 3 步：建一个"渲染器"（Renderer） ----------
-// 渲染器负责把场景+相机算出来的画面，画到网页画布上。
-// 每帧调一次 renderer.render()，就是"画一张画"。
-const renderer = new THREE.WebGLRenderer({ antialias: true }); // antialias=边缘抗锯齿
+// ---------- 3. 渲染器 ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement); // 把画布插进网页
+document.body.appendChild(renderer.domElement);
 
 
-// ---------- 第 4 步：往场景里放物体 ----------
-// Mesh（网格）= 形状（Geometry）+ 材质（Material）
-// 形状决定它长什么样，材质决定它表面什么颜色、怎么反光。
-const cube = new THREE.Mesh(
-  new THREE.BoxGeometry(1, 1, 1),                              // 长宽高各 1 米
-  new THREE.MeshStandardMaterial({ color: 0x4fc3ff })          // 0x4fc3ff = 天蓝色
+// ---------- 4. 车（暂时还是方块，但做成扁长的，能看出车头） ----------
+const kart = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 0.6, 1.6),
+  new THREE.MeshStandardMaterial({ color: 0x4fc3ff })
 );
-scene.add(cube); // 放进去才存在
+kart.position.y = 0.3;
+scene.add(kart);
 
 
-// ---------- 第 5 步：打光 ----------
-// MeshStandardMaterial 是靠光算颜色的：没有光，它就是一片纯黑。
-const sun = new THREE.DirectionalLight(0xffffff, 3); // 方向光，像太阳
-sun.position.set(2, 3, 4);                           // 光从右上前方照过来
+// ---------- 5. 地面网格 ----------
+// 没有参照物就看不出车在动。网格让移动变得可见。
+const grid = new THREE.GridHelper(80, 80, 0x2f4a7a, 0x1b2740);
+scene.add(grid);
+
+
+// ---------- 6. 灯光 ----------
+const sun = new THREE.DirectionalLight(0xffffff, 3);
+sun.position.set(4, 8, 6);
 scene.add(sun);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));    // 环境光，给暗面一点底光
+
+// ---------- 7. 键盘 ----------
+// keydown 时把按键记下来，keyup 时删掉。
+// 为什么不直接在 keydown 里移动？因为按住不放时 keydown 会疯狂重复触发，
+// 而我们要的是"按住 = 持续前进"，所以记状态、每帧读一次，这才是正确做法。
+const keys = new Set();
+window.addEventListener('keydown', (e) => keys.add(e.key));
+window.addEventListener('keyup', (e) => keys.delete(e.key));
 
 
-// ---------- 第 6 步：动画循环 ----------
-// 网页不会自己"动"。要一帧一帧地画，才能形成动画。
-// 一秒钟画约 60 帧，人眼就觉得是连续的。
+// ---------- 8. 车的状态 + 计时器 ----------
+let state = createKartState();
+const clock = new THREE.Clock(); // 用来量"距上一帧过了多少秒"
+
+
+// ---------- 9. 每帧循环 ----------
 function frame() {
-  cube.rotation.x += 0.01;  // 让方块绕 X 轴转一点点
-  cube.rotation.y += 0.015; // 同时绕 Y 轴转一点点（转起来才看得出是立体的）
+  // 限幅很重要：切到别的标签页再切回来时，dt 可能是几十秒，
+  // 不限的话车会瞬移出去。0.1 秒 = 最多按 10fps 处理，够用了。
+  const dt = Math.min(clock.getDelta(), 0.1);
 
-  renderer.render(scene, camera); // 画这一帧
+  // 读键盘 → 变成"意图"
+  const input = {
+    forward: (keys.has('ArrowUp') || keys.has('w')) ? 1 : 0,
+    turn: ((keys.has('ArrowLeft') || keys.has('a')) ? 1 : 0)
+        - ((keys.has('ArrowRight') || keys.has('d')) ? 1 : 0),
+  };
 
-  requestAnimationFrame(frame);   // 预约下一帧——这一行让循环持续下去
+  // 算新状态（这一步有 9 个测试护航）
+  state = stepKart(state, input, dt);
+
+  // 把状态画到 3D 物体上
+  kart.position.x = state.x;
+  kart.position.z = state.z;
+  kart.rotation.y = state.yaw;
+
+  // 相机跟在车后上方
+  // 车头朝 (-sin, 0, -cos)，所以"车后"就是 (+sin, 0, +cos)
+  camera.position.set(
+    state.x + Math.sin(state.yaw) * 6,
+    3,
+    state.z + Math.cos(state.yaw) * 6
+  );
+  camera.lookAt(state.x, 0.3, state.z);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
 }
-frame(); // 启动循环
+frame();
 
 
-// ---------- 第 7 步：跟随窗口大小 ----------
-// 用户拖动浏览器窗口时，相机比例和画布尺寸都要跟着变，否则画面会被拉伸变形。
+// ---------- 10. 窗口大小变化 ----------
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix(); // 改了相机参数必须调这一行才生效
+  camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
