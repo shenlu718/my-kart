@@ -50,3 +50,21 @@ export function stepKart(state, input, dt) {
     yaw,
   };
 }
+
+
+/**
+ * 把「相机俯角」换算成「相机高度」。
+ *
+ * 相机在车后 distance 米，要从上往下看 angleDeg 度，它该抬多高？
+ * 直角三角形：tan(俯角) = 高 / 底 → 高 = 底 × tan(俯角)
+ *
+ * 这里有个极易搞错的点：Math.tan 收的是**弧度**，不是角度。
+ * 少写那个 * Math.PI / 180，45° 会算出 tan(45 弧度) ≈ 1.62 而不是 1，
+ * 相机跑到天上去。测试里专门钉了这一条。
+ *
+ * @param {{distance:number, angleDeg:number}} cam
+ * @returns {number} 相机应该离地多高
+ */
+export function camHeightOf(cam) {
+  return cam.distance * Math.tan((cam.angleDeg * Math.PI) / 180);
+}

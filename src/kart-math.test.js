@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createKartState, stepKart, MOVE_SPEED, TURN_SPEED } from './kart-math.js';
+import { createKartState, stepKart, camHeightOf, MOVE_SPEED, TURN_SPEED } from './kart-math.js';
 
 
 // ---------------------------------------------------------------------------
@@ -150,4 +150,32 @@ test('不修改传入的状态对象（纯函数）', () => {
   const snapshot = { ...original };
   stepKart(original, { forward: 1, turn: 1 }, 1);
   assert.deepEqual(original, snapshot, '传入的对象被改动了');
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 9：相机高度换算
+//
+//  这条测试专门防一个极容易犯的错：Math.tan 收的是**弧度**不是角度。
+//  少写 * Math.PI / 180 的话，45° 会被当成 45 弧度算，
+//  结果 tan(45) ≈ 1.62 —— 相机跑到天上去了，但代码"看着没问题"。
+// ---------------------------------------------------------------------------
+test('俯角 45°：相机高度应该正好等于水平距离（tan45° = 1）', () => {
+  const h = camHeightOf({ distance: 10, angleDeg: 45 });
+  assert.ok(Math.abs(h - 10) < 1e-9, `预期 10，实际 ${h}`);
+});
+
+test('俯角 0°：相机和车一样高', () => {
+  const h = camHeightOf({ distance: 8, angleDeg: 0 });
+  assert.ok(Math.abs(h) < 1e-9, `预期 0，实际 ${h}`);
+});
+
+test('俯角变大：相机更高；距离变大：相机同比例更高', () => {
+  const low = camHeightOf({ distance: 6, angleDeg: 20 });
+  const steep = camHeightOf({ distance: 6, angleDeg: 40 });
+  assert.ok(steep > low, '俯角变大时相机应该更高');
+
+  const near = camHeightOf({ distance: 5, angleDeg: 30 });
+  const far = camHeightOf({ distance: 10, angleDeg: 30 });
+  assert.ok(Math.abs(far - near * 2) < 1e-9, '距离翻倍时高度应该也翻倍（角度不变）');
 });

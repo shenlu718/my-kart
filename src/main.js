@@ -8,18 +8,32 @@
 // ============================================================================
 
 import * as THREE from '../vendor/three/three.module.js';
-import { createKartState, stepKart } from './kart-math.js';
+import { createKartState, stepKart, camHeightOf } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
 
 // ---------------------------------------------------------------------------
-//  相机参数：想调手感就改这三个数
+//  相机参数
 //
-//  俯角 = atan(CAM_HEIGHT / CAM_DISTANCE)，目前 atan(4.6 / 8) ≈ 30°。
-//  觉得太平就调大 CAM_HEIGHT；觉得车太大就调大 CAM_DISTANCE。
+//  只用两个「人能感觉到的量」控制，高度由它们算出来：
+//    距离 —— 相机在车后多远（直接决定车看起来多大）
+//    俯角 —— 从上往下看多少度（决定看得到多远 vs 看到多少脚下）
+//
+//  上一版把「距离」和「高度」当成两个独立参数，结果调距离时俯角跟着变，
+//  两个变量互相污染，调不出想要的手感。
+//
+//  ★ 这两个数可以边开边调，不用改代码、不用刷新：
+//       [   ]    ← 拉近 / 拉远   （车变大 / 变小）
+//       -   =    ← 俯角变平 / 变陡（看得更远 / 看得更下）
+//    右上角实时显示当前值。调到满意后把数字告诉我，我固化成默认。
 // ---------------------------------------------------------------------------
-const CAM_DISTANCE = 8;
-const CAM_HEIGHT = 4.6;
+const cam = {
+  distance: 6.8,  // 相机在车后多远
+  angleDeg: 27,   // 俯角（度）
+};
+
+// （俯角 → 高度的换算 camHeightOf 已搬到 kart-math.js，
+//   那样才能被自动化测试覆盖——它有个极易搞错的弧度/角度陷阱。）
 
 
 // ---------- 1. 场景 ----------
@@ -129,6 +143,44 @@ document.addEventListener('visibilitychange', () => {
 });
 
 
+// ---------- 7b. 相机实时调节 ----------
+// 为什么要做这个：手感是主观的。上一轮我按「有点偏大」猜了一个数，
+// 结果直接调过头变成「过于小」。与其让我猜、你来回报感受，
+// 不如你自己边开边调——你的手指比我准。
+//
+// 调满意后把右上角的数字告诉我，我把它固化成默认值。
+const camInfo = document.createElement('div');
+camInfo.style.cssText = [
+  'position:fixed', 'right:10px', 'top:10px', 'z-index:10',
+  'padding:6px 10px', 'font:12px/1.6 ui-monospace,Consolas,monospace',
+  'color:#8fb3e0', 'background:#0b1020cc', 'border:1px solid #24365a',
+  'border-radius:6px', 'pointer-events:none', 'white-space:pre',
+].join(';');
+document.body.appendChild(camInfo);
+
+function showCamInfo() {
+  camInfo.textContent =
+    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°\n` +
+    `[ ] 调距离      - = 调俯角`;
+}
+showCamInfo();
+
+// 每按一次变化多少。想调得更细就把这两个数改小。
+const CAM_STEP_DISTANCE = 0.2;
+const CAM_STEP_ANGLE = 1;
+
+window.addEventListener('keydown', (e) => {
+  let changed = false;
+  // [ 和 ] 调距离：车看起来变大 / 变小
+  if (e.key === '[') { cam.distance = Math.max(3,  +(cam.distance - CAM_STEP_DISTANCE).toFixed(2)); changed = true; }
+  if (e.key === ']') { cam.distance = Math.min(20, +(cam.distance + CAM_STEP_DISTANCE).toFixed(2)); changed = true; }
+  // - 和 = 调俯角：看得更远 / 看得更下
+  if (e.key === '-') { cam.angleDeg = Math.max(5,  cam.angleDeg - CAM_STEP_ANGLE); changed = true; }
+  if (e.key === '=' || e.key === '+') { cam.angleDeg = Math.min(60, cam.angleDeg + CAM_STEP_ANGLE); changed = true; }
+  if (changed) showCamInfo();
+});
+
+
 // ---------- 8. 车的状态 + 计时器 ----------
 let state = createKartState();
 const clock = new THREE.Clock(); // 用来量"距上一帧过了多少秒"
@@ -159,9 +211,9 @@ function frame() {
   // 相机跟在车后上方
   // 车头朝 (-sin, 0, -cos)，所以"车后"是 (+sin, 0, +cos)
   camera.position.set(
-    state.x + Math.sin(state.yaw) * CAM_DISTANCE,
-    CAM_HEIGHT,
-    state.z + Math.cos(state.yaw) * CAM_DISTANCE
+    state.x + Math.sin(state.yaw) * cam.distance,
+    camHeightOf(cam),
+    state.z + Math.cos(state.yaw) * cam.distance
   );
   camera.lookAt(state.x, 0.3, state.z);
 
