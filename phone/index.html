@@ -97,7 +97,7 @@ async function send() {
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     dot.classList.add('on');
-    stateEl.textContent = '已连接';
+    stateEl.textContent = '已连接 · v2';   // 版本号：用来一眼看出手机跑的是不是最新页面
   } catch (e) {
     dot.classList.remove('on');
     stateEl.textContent = '连不上电脑（' + (e.message || e) + '）';

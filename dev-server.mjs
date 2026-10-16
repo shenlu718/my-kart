@@ -66,6 +66,11 @@ const MIME = {
 let remoteInput = { forward: 0, turn: 0, at: 0 };
 const sseClients = new Set();
 
+// 诊断日志：手机到底取没取到"新页面/新模块"、到底有没有按下键。
+// 心跳是 60ms 一次（一秒 16 次），所以只记「第一次」和「非零输入」，不然会刷屏。
+let sawFirstInputPost = false;
+let lastNonZeroLogAt = 0;
+
 function broadcastInput() {
   const line = `data: ${JSON.stringify(remoteInput)}\n\n`;
   for (const client of sseClients) {
@@ -146,6 +151,16 @@ const server = http.createServer(async (req, res) => {
       // 序号原样透传（游戏侧用它丢弃乱序/重复的包）。没带就不放这个字段。
       const seq = Number.isSafeInteger(msg && msg.seq) && msg.seq >= 0 ? msg.seq : undefined;
       remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), seq, at: Date.now() };
+
+      if (!sawFirstInputPost) {
+        sawFirstInputPost = true;
+        console.log('  ✓ 收到手机的第一条输入（说明手柄页在跑）');
+      }
+      if ((remoteInput.forward !== 0 || remoteInput.turn !== 0) &&
+          Date.now() - lastNonZeroLogAt > 1000) {
+        lastNonZeroLogAt = Date.now();
+        console.log(`  ← 手机按键：油门 ${remoteInput.forward}  转向 ${remoteInput.turn}`);
+      }
       broadcastInput();
       res.writeHead(204, { 'Cache-Control': 'no-store' });
       res.end();
@@ -174,6 +189,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 4. 读文件并返回
+  //    诊断：手机上"是不是真的重新加载了"看这一行 —— 只有真正刷新才会取到新模块
+  if (urlPath.startsWith('/phone/') || urlPath === '/src/pad-input.js') {
+    console.log(`  ← 取文件：${urlPath}`);
+  }
   try {
     const body = await readFile(filePath);
     res.writeHead(200, {
