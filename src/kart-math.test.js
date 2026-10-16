@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createKartState, stepKart, nextSpeed,
-  camHeightOf, approachFactor, followRateFor, cameraSideOffset,
+  camHeightOf, approachFactor, followRateFor, cameraSideOffset, damp, dampAngle,
   MAX_SPEED, REVERSE_SPEED, ACCEL, TURN_SPEED,
 } from './kart-math.js';
 
@@ -339,4 +339,66 @@ test('镜头偏移跟着车头转向：车头转 90° 后，偏移方向也跟�
 
   assert.ok(Math.abs(right.x) < 1e-9, `x 应该接近 0，实际 ${right.x}`);
   assert.ok(right.z < 0, `应该往 -Z 偏，实际 ${right.z}`);
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 13：指数逼近（修「车忽大忽小」那个 bug 的基础工具）
+//
+//  用户实测：「反复按 A/D，车子变得一大一小、突变」。
+//  根因是按键的瞬时值（0/1 之间跳）被直接接给了相机参数。
+//  这条钉住平滑工具本身：帧率无关、且收敛到解析解。
+// ---------------------------------------------------------------------------
+test('指数逼近：30 帧与 60 帧跑完 1 秒，结果完全相同', () => {
+  const tau = 0.2;
+
+  let at60 = 0;
+  for (let i = 0; i < 60; i++) at60 = damp(at60, 1, tau, 1 / 60);
+
+  let at30 = 0;
+  for (let i = 0; i < 30; i++) at30 = damp(at30, 1, tau, 1 / 30);
+
+  assert.ok(Math.abs(at60 - at30) < 1e-9, `60帧到 ${at60}，30帧到 ${at30}，应该一致`);
+
+  // 解析解：1 - e^(-t/tau)
+  assert.ok(Math.abs(at60 - (1 - Math.exp(-1 / tau))) < 1e-9,
+    `应该等于 1-e^(-5)，实际 ${at60}`);
+});
+
+test('指数逼近：tau 越小追得越快；dt = 0 时不动', () => {
+  const fast = damp(0, 1, 0.05, 0.1);
+  const slow = damp(0, 1, 0.5, 0.1);
+  assert.ok(fast > slow, `时间常数小的应该追得更快：${fast} vs ${slow}`);
+  assert.equal(damp(0, 1, 0.2, 0), 0, '没经过时间就不该动');
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 14：角度平滑必须走短边（环形角度的经典陷阱）
+//
+//  179° → -179° 实际只差 2°，可是直接相减得到 -358°。
+//  如果用普通 damp，镜头会绕一大圈甩过去。这条钉住最短弧。
+// ---------------------------------------------------------------------------
+test('角度平滑走最短的一边：179° 到 -179° 只跨过 ±180 那条线', () => {
+  const from = (179 * Math.PI) / 180;
+  const to = (-179 * Math.PI) / 180;
+
+  const next = dampAngle(from, to, 1, 0.1);
+  const moved = Math.atan2(Math.sin(next - from), Math.cos(next - from));
+
+  assert.ok(moved > 0, `应该跨过 ±180 往正方向走，实际移动了 ${moved}`);
+  assert.ok(Math.abs(moved) < 0.02, `只该走一小步，实际 ${moved}`);
+});
+
+test('反例：朴素线性插值确实会走反方向（这就是必须避开它的原因）', () => {
+  const from = (179 * Math.PI) / 180;
+  const to = (-179 * Math.PI) / 180;
+
+  const naiveHalfway = from + (to - from) * 0.5;
+  assert.ok(naiveHalfway < from, '朴素插值往反方向走到了 0° 附近');
+
+  // 而最短弧版本是瞬间到位时，位移方向为正（跨过 ±180）
+  const snapped = dampAngle(from, to, 1e-6, 1);
+  const moved = Math.atan2(Math.sin(snapped - from), Math.cos(snapped - from));
+  assert.ok(moved > 0, `最短弧应该往正方向走，实际 ${moved}`);
 });

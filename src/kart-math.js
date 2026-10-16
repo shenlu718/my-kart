@@ -163,6 +163,52 @@ export function approachFactor(rate, dt) {
 
 
 /**
+ * 指数逼近 —— 把一个值平滑地推向目标。帧率无关。
+ *
+ * 和 approachFactor 是一对：那个给出"这一帧该靠近多少比例"，
+ * 这个直接把结果算出来。
+ *
+ * 为什么所有"会跳变的输入"都要先过它：
+ * 用户实测报过一个 bug —— 反复按 A/D 时车忽大忽小、突变。
+ * 根因就是把按键的瞬时值（0 或 1 之间跳）直接接给了相机参数。
+ * 中间必须有一层平滑，让相机去追一个**连续**的目标。
+ *
+ * @param {number} cur 当前值
+ * @param {number} target 目标值
+ * @param {number} tau 时间常数（秒）。越小追得越快，1 秒后走完约 63%
+ * @param {number} dt 这一帧过了多少秒
+ * @returns {number} 平滑后的新值
+ */
+export function damp(cur, target, tau, dt) {
+  if (!(tau > 0)) return target;
+  return cur + (target - cur) * (1 - Math.exp(-dt / tau));
+}
+
+
+/**
+ * 角度版的 damp —— 走**最短的一边**。
+ *
+ * 为什么不能直接用 damp 处理角度：
+ * 角度是环形的。从 179° 转到 -179°，实际只差 2°（跨过 ±180 那条线），
+ * 可是直接相减得到 -358°，相机会绕一大圈 —— 画面上一记猛甩。
+ *
+ * Math.atan2(sin(diff), cos(diff)) 正好把任意角度差规整到 -π..π，
+ * 这就是"最短弧"。
+ *
+ * @param {number} cur 当前角度（弧度）
+ * @param {number} target 目标角度（弧度）
+ * @param {number} tau 时间常数（秒）
+ * @param {number} dt 这一帧过了多少秒
+ * @returns {number} 平滑后的新角度
+ */
+export function dampAngle(cur, target, tau, dt) {
+  const diff = Math.atan2(Math.sin(target - cur), Math.cos(target - cur));
+  if (!(tau > 0)) return cur + diff;
+  return cur + diff * (1 - Math.exp(-dt / tau));
+}
+
+
+/**
  * 相机跟随的速度系数 —— 随车速自适应。
  *
  * 为什么需要自适应？

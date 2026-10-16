@@ -9,8 +9,8 @@
 
 import * as THREE from '../vendor/three/three.module.js';
 import {
-  createKartState, stepKart, camHeightOf, approachFactor,
-  followRateFor, cameraSideOffset, MAX_SPEED,
+  createKartState, stepKart, camHeightOf, damp, dampAngle,
+  cameraSideOffset, MAX_SPEED,
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
@@ -34,20 +34,29 @@ const cam = {
 };
 
 /**
- * 相机追赶车的速度。越大跟得越紧（越接近"硬贴"），越小越飘。
- * 7 大约等于 0.14 秒追上剩余路程的一半。
+ * 相机方位角的时间常数（秒）—— 相机"坐在车后方哪个方向"追上车的朝向要多久。
+ *
+ * ★ 这是整个相机里**唯一**该有滞后的地方。
+ *
+ * 为什么：参考项目（kart-royale）的注释把它说得最清楚 ——
+ *   「不用位置弹簧：追一个移动目标的弹簧会留下 |v|×T 的稳态误差，
+ *     这会在高速时悄悄改写相机几何。」
+ * 我之前恰恰把平滑加在**位置**上，于是速度一快、相机落后越多、
+ * 车在屏幕上就越小 —— 用户实测报的「峰值速度一变大车就变小」。
+ *
+ * 平滑放在**方位角**上没有这个问题：它只让镜头摆得柔一点，
+ * 不改变相机到车的距离。
  */
-const CAM_FOLLOW_RATE = 7;
+const CAM_YAW_TAU = 0.16;
 
 /**
- * 跟随系数的速度增益：每 1 米/秒车速，系数额外加这么多。
+ * 转向输入的平滑时间常数（秒）。
  *
- * 不加这一项会怎样（用户实测发现的）：
- *   滞后量 ≈ 车速 ÷ 系数。系数固定时，速度越快落后越多，
- *   车在屏幕上就越来越小 ——「峰值速度一变大，车突然变得很小」。
- * 加上增益后，滞后量收敛到 1/gain ≈ 0.67 米，不再随速度膨胀。
+ * 为什么需要：按键是 0/1 跳变的。不平滑就直接拿去算相机偏移和拉近，
+ * 相机就得去追一个**自己也在跳**的目标 —— 反复按 A/D 时车忽大忽小、突变。
+ * （用户实测原话：「一大一小、一大一小，而且是突变」。）
  */
-const CAM_FOLLOW_GAIN = 1.5;
+const TURN_SMOOTH_TAU = 0.14;
 
 /** 过弯时镜头往弯道外侧偏多少米（让出弯心视野，也让"路有宽度"这件事看得见） */
 const TURN_CAMERA_OFFSET = 1.2;
@@ -359,25 +368,27 @@ window.addEventListener('keydown', (e) => {
 });
 
 
-// ---------- 8. 车的状态 + 计时器 ----------
+// ---------- 8. 车的状态 + 相机状态 + 计时器 ----------
 let state = createKartState();
 let wheelRoll = 0;                 // 轮子累计转过的角度
 const clock = new THREE.Clock();   // 用来量"距上一帧过了多少秒"
 
+/** 相机坐在车后方的方位角。它弹簧式地追车的朝向 —— 那点滞后就是"镜头摆动感" */
+let camYaw = 0;
 
-// ---------- 8b. 相机跟随用的暂存对象 ----------
-// 复用一个 Vector3，不在帧循环里反复 new（每帧都分配新对象会拖慢性能，
-// 这是游戏代码里最常见的性能坑之一）
-const camTarget = new THREE.Vector3();
+/** 平滑后的转向量：相机参数一律用它，不用瞬时按键值（否则相机在追一个会跳的目标） */
+let turnSmooth = 0;
 
-// 先把相机瞬移到它该在的位置。
+
+// ---------- 8b. 相机的初始位置 ----------
+// 先把相机摆到它该在的地方。
 // 否则第一帧会从原点 (0,0,0) 一路"飞"过来，开场就是一段莫名其妙的运镜。
-camTarget.set(
-  Math.sin(state.yaw) * cam.distance,
+camYaw = state.yaw;
+camera.position.set(
+  Math.sin(camYaw) * cam.distance,
   camHeightOf(cam),
-  Math.cos(state.yaw) * cam.distance
+  Math.cos(camYaw) * cam.distance
 );
-camera.position.copy(camTarget);
 
 
 // ---------- 9. 每帧循环 ----------
@@ -416,28 +427,35 @@ function frame() {
   updatePosts(state.x, state.z);
 
   // ---- 相机 ----
-  // 过弯时把镜头往**弯道外侧**偏一点：于是车在画面上偏向弯心一侧，
-  // 让出弯心的视野 —— 同时让玩家感觉到"这条路是有宽度的"。
-  const side = cameraSideOffset(input.turn, state.yaw, TURN_CAMERA_OFFSET);
+  //
+  // 架构（照参考项目 kart-royale 的做法）：
+  //   平滑只放两处 —— ① 方位角 camYaw  ② 转向标量 turnSmooth。
+  //   相机位置**精确算出**，不加位置弹簧。
+  //
+  //   为什么不能加位置弹簧：追一个移动目标的弹簧会留下 |v|×T 的稳态误差，
+  //   速度越快落后越多 —— 那正是"峰值速度一大、车就变小"的根因。
+  //   把滞后挪到方位角上，就只影响镜头摆动，不改变相机到车的距离。
 
-  // 过弯时稍微拉近一点，视野聚焦在车上、周围参照物少露一些
-  const distanceNow = cam.distance * (1 - Math.abs(input.turn) * TURN_CAMERA_ZOOM);
+  // ① 平滑转向输入：抹掉按键的 0/1 跳变（"忽大忽小"的直接原因就在这）
+  turnSmooth = damp(turnSmooth, input.turn, TURN_SMOOTH_TAU, dt);
+
+  // ② 方位角弹簧式追车的朝向。滞后 = 镜头摆动感（这是想要的），
+  //    走最短弧，所以跨过 ±180° 时不会绕一大圈。
+  camYaw = dampAngle(camYaw, state.yaw, CAM_YAW_TAU, dt);
+
+  // ③ 过弯时把镜头往**弯道外侧**偏一点，让车偏向弯心一侧、把弯心视野让出来
+  const side = cameraSideOffset(turnSmooth, state.yaw, TURN_CAMERA_OFFSET);
+
+  // ④ 过弯时稍微拉近（车更大、周围参照物少露一些），同样用平滑量
+  const distanceNow = cam.distance * (1 - Math.abs(turnSmooth) * TURN_CAMERA_ZOOM);
   const heightNow = distanceNow * Math.tan((cam.angleDeg * Math.PI) / 180);
 
-  camTarget.set(
-    state.x + Math.sin(state.yaw) * distanceNow + side.x,
+  // ⑤ 位置精确算出 —— 不加弹簧
+  camera.position.set(
+    state.x + Math.sin(camYaw) * distanceNow + side.x,
     heightNow,
-    state.z + Math.cos(state.yaw) * distanceNow + side.z
+    state.z + Math.cos(camYaw) * distanceNow + side.z
   );
-
-  // 平滑地逼近那个位置，而不是每帧硬贴上去。
-  // 相机会稍微"落后"一点：加速时被甩开、停下时慢慢跟上——
-  // 这一点点滞后就是速度感的来源；硬跟会让画面僵硬死板。
-  //
-  // 但系数必须随速度自适应：固定系数时速度越快落后越多、车就越小
-  //（用户实测发现的「峰值速度一变大，车突然变得很小」）。
-  const followRate = followRateFor(state.speed, CAM_FOLLOW_RATE, CAM_FOLLOW_GAIN);
-  camera.position.lerp(camTarget, approachFactor(followRate, dt));
 
   camera.lookAt(state.x, 0.3, state.z);
 
