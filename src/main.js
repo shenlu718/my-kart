@@ -73,8 +73,11 @@ function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
 
   // 读键盘 → 变成"意图"
+  // 上和下是一对相反数：同时按住时 1 - 1 = 0，自然就互相抵消了，
+  // 不用额外写 if 去处理"同时按下"这种情况。
   const input = {
-    forward: (keys.has('ArrowUp') || keys.has('w')) ? 1 : 0,
+    forward: ((keys.has('ArrowUp') || keys.has('w')) ? 1 : 0)
+           - ((keys.has('ArrowDown') || keys.has('s')) ? 1 : 0),
     turn: ((keys.has('ArrowLeft') || keys.has('a')) ? 1 : 0)
         - ((keys.has('ArrowRight') || keys.has('d')) ? 1 : 0),
   };
