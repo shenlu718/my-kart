@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   rollDegrees, angleDifference, steerFromTilt, screenAngle,
+  steerBoost, combineSteer, RATE_FULL_DPS,
   FLAT_THRESHOLD, STEER_DEADZONE_DEG,
 } from './tilt.js';
 
@@ -99,4 +100,35 @@ test('转向：非法 range 不会炸（除零）', () => {
 
 test('FLAT_THRESHOLD 是个合理的小数（守卫不能太严，否则一拿起来就 null）', () => {
   assert.ok(FLAT_THRESHOLD > 0 && FLAT_THRESHOLD < 0.5, `阈值应远小于 1，实际 ${FLAT_THRESHOLD}`);
+});
+
+// ---------------------------------------------------------------------------
+//  急转加成：拧得越快，额外多给一点转向
+//
+//  用户原话：「我手机转的快就是急转弯，我手机转的缓慢就是慢慢转弯」
+//  但纯角速度不可用（松手归零 → 没法保持一个弯），所以它只做**加成**。
+// ---------------------------------------------------------------------------
+test('★ 急转加成：拧得越快给得越多，但有上限', () => {
+  const slow = steerBoost(30, 0.4);
+  const fast = steerBoost(150, 0.4);
+  assert.ok(slow > 0 && fast > slow, `应该随速度增大：${slow} → ${fast}`);
+  assert.ok(Math.abs(steerBoost(90, 0.4)) < 0.4 + 1e-9, '不该超过设定的倍数');
+  assert.equal(steerBoost(90, 0), 0, '倍数为 0 就是完全不用角速度');
+});
+
+test('急转加成：方向跟着拧的方向，且左右对称', () => {
+  assert.ok(steerBoost(-90, 0.3) < 0, '往另一侧拧应该是负的');
+  assert.ok(Math.abs(steerBoost(90, 0.3) + steerBoost(-90, 0.3)) < 1e-9, '左右应当对称');
+});
+
+test('★ 合成：基础转向能保持，加成只把它推一点（推不出去）', () => {
+  assert.equal(combineSteer(0.5, 0, 0.4), 0.5, '不拧的时候就是纯倾角');
+  assert.ok(combineSteer(0.5, 180, 0.4) > 0.5, '拧得快应当把它推得更急');
+  assert.equal(combineSteer(1, 180, 0.4), 1, '已经满舵就钳在 1');
+  assert.equal(combineSteer(-1, -180, 0.4), -1);
+});
+
+test('合成：非法输入不会炸', () => {
+  assert.equal(combineSteer(NaN, NaN, NaN), 0);
+  assert.equal(combineSteer(0.3, 90, 0), 0.3);
 });

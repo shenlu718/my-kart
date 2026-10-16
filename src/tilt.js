@@ -103,3 +103,37 @@ export function steerFromTilt(deg, range, invert = false) {
     : Math.sign(deg) * Math.min(1, (mag - STEER_DEADZONE_DEG) / (range - STEER_DEADZONE_DEG));
   return invert ? -v : v;
 }
+
+// ---------------------------------------------------------------------------
+//  「急转加成」——手机拧得越快，额外多给一点转向
+//
+//  为什么需要（用户原话）：
+//    「我手机转的快就是急转弯，我手机转的缓慢就是慢慢转弯」
+//
+//  ★ 为什么不能只用角速度：
+//    角速度是"转速表"，**松手就归零**。一个弯要持续好几秒，玩家不可能连拧三秒手机，
+//    所以纯角速度会导致"想保持转弯就必须一直拧" —— 没法开。
+//    正确做法：**绝对倾角当主力（可保持）**，角速度只做**短暂的加成**。
+// ---------------------------------------------------------------------------
+
+/** 每秒拧多少度算"满额"加成（再快也是满额，避免甩一下就爆表） */
+export const RATE_FULL_DPS = 180;
+
+/**
+ * 角速度带来的"急转加成"。
+ * @param {number} rateDps 拧的角速度（度/秒，带正负号）
+ * @param {number} gain 加成倍数（0 = 完全不用角速度，就是他面板上调的那个）
+ * @returns {number} 加成量（-gain .. +gain）
+ */
+export function steerBoost(rateDps, gain) {
+  if (!Number.isFinite(rateDps) || !Number.isFinite(gain) || gain === 0) return 0;
+  const t = Math.max(-1, Math.min(1, rateDps / RATE_FULL_DPS));
+  return t * gain;
+}
+
+/** 主转向 + 急转加成，最后钳在 [-1,1]（超范围会让前轮打死） */
+export function combineSteer(tiltSteer, rateDps, gain) {
+  const base = Number.isFinite(tiltSteer) ? tiltSteer : 0;
+  const sum = base + steerBoost(rateDps, gain);
+  return Math.max(-1, Math.min(1, sum));
+}
