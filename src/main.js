@@ -10,7 +10,7 @@
 import * as THREE from '../vendor/three/three.module.js';
 import {
   createKartState, stepKart, camHeightOf, damp, dampAngle,
-  cameraSideOffset, MAX_SPEED,
+  cameraSideOffset, angularRateDegPerSec, screenFraction, snapToTile, MAX_SPEED,
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
@@ -191,17 +191,23 @@ scene.add(kart);
 
 
 // ---------- 5. 地面 ----------
+/** 地面平面边长（米）—— 够大，再配合下面的「跟踪搬运」就等于无限大 */
+const GROUND_SIZE = 2000;
+/** 贴图沿一边铺多少次 → 一格边长 = GROUND_SIZE / GROUND_REPEAT = 4 米 */
+const GROUND_REPEAT = 500;
+/** 一格的边长（米）。搬运地面必须按它的整数倍走，原因见 updateGround */
+const GROUND_TILE = GROUND_SIZE / GROUND_REPEAT;
+
 /**
- * 造一块「看起来无限」的地面。
+ * 造一块地面：把网格图案做成**一张会重复铺开的贴图**，贴在一块平面。
  *
  * 之前用 GridHelper 是一块有限的线框（80×80），车开出去就没参照物了。
  *
- * 让网格跟着车走？也不行——网格的周期和跟随步长一样时，图案完全重合，
- * 看起来车根本没动，移动感就没了。
- *
- * 正确做法：把网格图案做成**一张会重复铺开的贴图**，贴在一块巨大的平面上。
- * 贴图锚在平面自己的坐标上，平面不动，所以车一动、图案相对车就在动，
- * 移动感是真的；而平面有 2000 米，开不到边。
+ * 这里有两件事必须分开看：
+ *   ① 图案要锚在**世界坐标**上 —— 图案和车一起动，移动感就没了；
+ *   ② 平面本身要永远盖住车 —— 否则车开远了会开出平面边缘。
+ * 这一版平面是钉在原点的一块有限平面，所以 ② 还没满足，
+ * 由 updateGround 每帧补上（补的时候必须守 ① 的约束）。
  */
 function createGround() {
   // 用一张 64×64 的画布画出"一格"长什么样
@@ -223,18 +229,41 @@ function createGround() {
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping; // 横向铺不满就重复
   texture.wrapT = THREE.RepeatWrapping; // 纵向同上
-  texture.repeat.set(500, 500);         // 铺 500×500 次 → 2000 米里每 4 米一格
+  texture.repeat.set(GROUND_REPEAT, GROUND_REPEAT); // 铺 GROUND_REPEAT 次 → 每 GROUND_TILE 米一格
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy(); // 减轻远处的闪烁
 
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(2000, 2000),
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE),
     new THREE.MeshBasicMaterial({ map: texture })
   );
-  ground.rotation.x = -Math.PI / 2; // 平面默认竖着，转 90° 放平当地面
-  ground.position.y = -0.01;        // 比车底略低，避免两个面重叠时闪烁
-  return ground;
+  mesh.rotation.x = -Math.PI / 2; // 平面默认竖着，转 90° 放平当地面
+  mesh.position.y = -0.01;        // 比车底略低，避免两个面重叠时闪烁
+  return mesh;
 }
-scene.add(createGround());
+const ground = createGround();
+scene.add(ground);
+
+/**
+ * 每帧把地面搬到车脚下 —— 但只能按**整格**搬。
+ *
+ * 用户实测报的 bug：
+ *   「行驶很长一段距离之后，地上的网格消失了，只有柱子出现。」
+ * 根因：地面是钉在原点、边长 2000 米的平面，车直线开约 84 秒（1000 米）
+ * 就开出了边缘；而路桩是一圈跟着车循环的，所以只剩柱子、没了地面。
+ *
+ * 那让地面直接跟着车走（position = 车坐标）行不行？——不行。
+ * 那正是之前踩过的坑：图案和车一起动，车相对网格就永远不动，
+ * 移动感立刻消失（和"让网格跟着车走"是同一个错误）。
+ *
+ * 正解：按**一格的整数倍**搬。贴图每 GROUND_TILE（4 米）重复一次，
+ * 所以整体挪 4 米的整数倍之后，图案和世界坐标完全对齐 ——
+ * 看起来地面钉死在世界里纹丝不动，而平面永远够大。
+ * 「图案锚在世界坐标、平面跟着车搬」，是这个问题的标准解法。
+ */
+function updateGround(carX, carZ) {
+  ground.position.x = snapToTile(carX, GROUND_TILE);
+  ground.position.z = snapToTile(carZ, GROUND_TILE);
+}
 
 
 // ---------- 5b. 参照物（路桩） ----------
@@ -325,28 +354,67 @@ document.addEventListener('visibilitychange', () => {
 });
 
 
-// ---------- 7b. 参数面板 + 实时调节 ----------
-// 为什么要做这个：手感是主观的。之前我按「有点偏大」猜了一个数，
-// 结果直接调过头变成「过于小」。与其让我猜、你来回报感受，
-// 不如你自己边开边调——你的手指比我准。
-const camInfo = document.createElement('div');
-camInfo.style.cssText = [
+// ---------- 7b. 实时指标面板 + 参数实时调节 ----------
+// 为什么要做这个面板：手感是主观的，但**它的变化是客观的**。
+// 之前我按「有点偏大」猜了一个相机参数，结果直接调过头变成「过于小」——
+// 与其让我猜、你来回报感受，不如把关键量显示在屏幕上：
+// 「相机摆动多少度/秒」「车占屏多少」——「是不是更稳了」「是不是又变小了」，
+// 看数字比看感觉可靠得多。
+//
+// 参考项目也是这么做的：作者靠 camera-probe 测 lag/swing/framing 来调参，
+// 而不是靠肉眼反复试。这个面板就是我们的轻量版 camera-probe。
+const panel = document.createElement('div');
+panel.style.cssText = [
   'position:fixed', 'right:10px', 'top:10px', 'z-index:10',
   'padding:6px 10px', 'font:12px/1.6 ui-monospace,Consolas,monospace',
   'color:#8fb3e0', 'background:#0b1020cc', 'border:1px solid #24365a',
   'border-radius:6px', 'pointer-events:none', 'white-space:pre',
 ].join(';');
-document.body.appendChild(camInfo);
+document.body.appendChild(panel);
 
-let liveSpeed = 0; // 面板上显示的实际车速，由帧循环更新
+let panelVisible = true;
 
-function showCamInfo() {
-  camInfo.textContent =
-    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°    峰值 ×${speedScale.toFixed(1)}\n` +
-    `当前车速 ${liveSpeed.toFixed(1)} 米/秒\n` +
-    `[ ] 调距离   - = 调俯角   , . 调速度`;
+/** 面板上显示的实时读数，全部由帧循环更新 */
+const metrics = {
+  speed: 0,        // 当前车速（米/秒，倒车为负）
+  swing: 0,        // 相机摆动（度/秒，已平滑）
+  swingPeak: 0,    // 相机摆动 1 秒内的峰值（度/秒）—— 看「最猛的一下有多猛」
+  framing: 0,      // 车占屏比例（0~1）
+  turnOffset: 0,   // 过弯镜头偏移（米）
+  zoom: 0,         // 过弯拉近比例（0~1）
+};
+
+/**
+ * 车的基准高度（米）—— 算「车占屏比例」时的参照尺寸。
+ * 取小车模型的总高：轮子到驾驶舱顶约 0.86，凑整成 0.9 好记。
+ */
+const KART_REF_HEIGHT = 0.9;
+const KART_CENTER_Y = KART_REF_HEIGHT / 2;
+
+/** 摆动读数的平滑时间常数：raw 值每帧抖得厉害，平滑一下才看得清趋势 */
+const SWING_SMOOTH_TAU = 0.25;
+/** 摆动峰值的衰减时间常数：尖峰被记下来、再慢慢落回去（像 VU 表） */
+const SWING_PEAK_TAU = 1.0;
+
+let lastPanelText = '';
+
+/** 把当前读数画到面板上。内容没变就不动 DOM（没必要每帧都写一遍）。 */
+function renderPanel() {
+  const text =
+    `— 实时指标 —\n` +
+    `车速     ${metrics.speed.toFixed(1).padStart(5)} 米/秒   ${(metrics.speed * 3.6).toFixed(0).padStart(4)} km/h\n` +
+    `相机摆动 ${metrics.swing.toFixed(0).padStart(5)} °/s   峰值 ${metrics.swingPeak.toFixed(0).padStart(5)} °/s\n` +
+    `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
+    `过弯偏移 ${metrics.turnOffset.toFixed(2).padStart(5)} 米   拉近 ${(metrics.zoom * 100).toFixed(0).padStart(3)} %\n` +
+    `— 相机 —\n` +
+    `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
+    `[ ] 距离  - = 俯角  , . 速度  P 收起面板`;
+  if (text !== lastPanelText) {
+    lastPanelText = text;
+    panel.textContent = text;
+  }
 }
-showCamInfo();
+renderPanel();
 
 // 每按一次变化多少。想调得更细就把这几个数改小。
 const CAM_STEP_DISTANCE = 0.2;
@@ -354,17 +422,21 @@ const CAM_STEP_ANGLE = 1;
 const SPEED_STEP = 0.1;
 
 window.addEventListener('keydown', (e) => {
-  let changed = false;
   // [ 和 ] 调距离：车看起来变大 / 变小
-  if (e.key === '[') { cam.distance = Math.max(3,  +(cam.distance - CAM_STEP_DISTANCE).toFixed(2)); changed = true; }
-  if (e.key === ']') { cam.distance = Math.min(20, +(cam.distance + CAM_STEP_DISTANCE).toFixed(2)); changed = true; }
+  if (e.key === '[') cam.distance = Math.max(3,  +(cam.distance - CAM_STEP_DISTANCE).toFixed(2));
+  if (e.key === ']') cam.distance = Math.min(20, +(cam.distance + CAM_STEP_DISTANCE).toFixed(2));
   // - 和 = 调俯角：看得更远 / 看得更下
-  if (e.key === '-') { cam.angleDeg = Math.max(5,  cam.angleDeg - CAM_STEP_ANGLE); changed = true; }
-  if (e.key === '=' || e.key === '+') { cam.angleDeg = Math.min(60, cam.angleDeg + CAM_STEP_ANGLE); changed = true; }
+  if (e.key === '-') cam.angleDeg = Math.max(5,  cam.angleDeg - CAM_STEP_ANGLE);
+  if (e.key === '=' || e.key === '+') cam.angleDeg = Math.min(60, cam.angleDeg + CAM_STEP_ANGLE);
   // , 和 . 调速度倍率：慢 / 快
-  if (e.key === ',') { speedScale = Math.max(0.3, +(speedScale - SPEED_STEP).toFixed(1)); changed = true; }
-  if (e.key === '.') { speedScale = Math.min(5,   +(speedScale + SPEED_STEP).toFixed(1)); changed = true; }
-  if (changed) showCamInfo();
+  if (e.key === ',') speedScale = Math.max(0.3, +(speedScale - SPEED_STEP).toFixed(1));
+  if (e.key === '.') speedScale = Math.min(5,   +(speedScale + SPEED_STEP).toFixed(1));
+  // P 收起 / 展开面板（想专心开车或截图时用）
+  if (e.key === 'p' || e.key === 'P') {
+    panelVisible = !panelVisible;
+    panel.style.display = panelVisible ? '' : 'none';
+  }
+  // 参数改动不用在这里手动刷面板：帧循环每帧重画，下一帧就带上了
 });
 
 
@@ -379,11 +451,22 @@ let camYaw = 0;
 /** 平滑后的转向量：相机参数一律用它，不用瞬时按键值（否则相机在追一个会跳的目标） */
 let turnSmooth = 0;
 
+/** 上一帧的方位角 —— 用来算「摆动速率」（本帧与上帧之差 ÷ dt） */
+let prevCamYaw = 0;
+
+/** 摆动读数的平滑值，以及它的 1 秒峰值 */
+let swingSmooth = 0;
+let swingPeak = 0;
+
+/** 复用一个临时点，避免每帧 new 一个 Vector3（减少垃圾回收压力） */
+const kartPoint = new THREE.Vector3();
+
 
 // ---------- 8b. 相机的初始位置 ----------
 // 先把相机摆到它该在的地方。
 // 否则第一帧会从原点 (0,0,0) 一路"飞"过来，开场就是一段莫名其妙的运镜。
 camYaw = state.yaw;
+prevCamYaw = camYaw;   // 摆动速率从第一帧起就要有正确的基准
 camera.position.set(
   Math.sin(camYaw) * cam.distance,
   camHeightOf(cam),
@@ -426,6 +509,9 @@ function frame() {
   // ---- 参照物跟着循环（把落到身后的桩子搬到身前）----
   updatePosts(state.x, state.z);
 
+  // ---- 地面按整格搬运，永远铺在车脚下（否则开远了会开出平面边缘）----
+  updateGround(state.x, state.z);
+
   // ---- 相机 ----
   //
   // 架构（照参考项目 kart-royale 的做法）：
@@ -459,12 +545,30 @@ function frame() {
 
   camera.lookAt(state.x, 0.3, state.z);
 
-  // 面板上的车速只在变化时才更新 DOM（没必要每帧都写一遍）
-  const shown = Math.round(state.speed * 10) / 10;
-  if (shown !== liveSpeed) {
-    liveSpeed = shown;
-    showCamInfo();
-  }
+  // ---- 实时指标（轻量测具）----
+  // 为什么显示这几项：手感是主观的，但它的变化是客观的。
+  // 「相机是不是更稳了」「车是不是又变小了」，看数字比看感觉可靠得多。
+
+  // ① 相机摆动速率（度/秒）：方位角每秒转过多少 —— 越猛越容易晕
+  const swingNow = angularRateDegPerSec(prevCamYaw, camYaw, dt);
+  prevCamYaw = camYaw;                       // 基准要在算完之后再更新
+  swingSmooth = damp(swingSmooth, swingNow, SWING_SMOOTH_TAU, dt);
+  swingPeak = Math.max(swingNow, swingPeak * Math.exp(-dt / SWING_PEAK_TAU));
+
+  // ② 车占屏比例：用**真实的相机到车距离**去算，相机拉远 / FOV 变化都如实反映
+  kartPoint.set(state.x, KART_CENTER_Y, state.z);
+  metrics.framing = screenFraction(KART_REF_HEIGHT, camera.position.distanceTo(kartPoint), camera.fov);
+
+  // ③ 过弯镜头偏移（米）与拉近比例 —— 直接来自平滑后的转向量
+  metrics.turnOffset = Math.abs(turnSmooth) * TURN_CAMERA_OFFSET;
+  metrics.zoom = Math.abs(turnSmooth) * TURN_CAMERA_ZOOM;
+
+  // ④ 车速 / 摆动读数
+  metrics.speed = state.speed;
+  metrics.swing = swingSmooth;
+  metrics.swingPeak = swingPeak;
+
+  renderPanel();
 
   renderer.render(scene, camera);
   requestAnimationFrame(frame);

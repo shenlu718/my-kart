@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   createKartState, stepKart, nextSpeed,
   camHeightOf, approachFactor, followRateFor, cameraSideOffset, damp, dampAngle,
+  angularRateDegPerSec, screenFraction, snapToTile,
   MAX_SPEED, REVERSE_SPEED, ACCEL, TURN_SPEED,
 } from './kart-math.js';
 
@@ -401,4 +402,129 @@ test('反例：朴素线性插值确实会走反方向（这就是必须避开�
   const snapped = dampAngle(from, to, 1e-6, 1);
   const moved = Math.atan2(Math.sin(snapped - from), Math.cos(snapped - from));
   assert.ok(moved > 0, `最短弧应该往正方向走，实际 ${moved}`);
+});
+
+
+// ===========================================================================
+//  四、实时指标（轻量测具）
+//
+//  用户最痛的一点：「速度的衰减、镜头的偏移、过弯的漂移……我感觉我一个人
+//  优化手感非常麻烦。」根因不是参数多，而是**没有反馈线**——调参变成了
+//  随机游走。参考项目的作者不是靠反复试参做出手感的，他有 camera-probe
+//  告诉他「摆动多少度/秒」「车占屏多少」。
+//
+//  这一节把两个指标算法钉死。它们都是纯函数，所以在屏幕上看不到之前，
+//  至少能先在测试里确认逻辑是对的。
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+//  指标 1：相机摆动速率（度/秒）—— "晕不晕"的客观量
+//
+//  ★ 和 dampAngle 是同一个坑：环形角度必须走最短弧。
+//    179° → -179° 实际只转了 2°，直接相减却得到 -358°，
+//    会把摆动值虚报一百多倍。下面专门有一条测试钉住它。
+// ---------------------------------------------------------------------------
+test('摆动速率：不动就是 0', () => {
+  assert.equal(angularRateDegPerSec(1.2, 1.2, 0.016), 0);
+});
+
+test('摆动速率：0.5 秒转过 90°，就是 180 度/秒', () => {
+  const rate = angularRateDegPerSec(0, Math.PI / 2, 0.5);
+  assert.ok(Math.abs(rate - 180) < 1e-9, `预期 180，实际 ${rate}`);
+});
+
+test('摆动速率：跨过 ±180 只算最短的那一小步（否则虚报上百倍）', () => {
+  const from = (179 * Math.PI) / 180;
+  const to = (-179 * Math.PI) / 180;
+  const rate = angularRateDegPerSec(from, to, 0.1);
+  // 实际只转了 2°，0.1 秒 → 20 度/秒
+  assert.ok(Math.abs(rate - 20) < 1e-9, `预期 20，实际 ${rate}`);
+});
+
+test('摆动速率：往哪个方向转都是正值（速率不带方向）', () => {
+  const up = angularRateDegPerSec(0, 0.5, 0.1);
+  const down = angularRateDegPerSec(0, -0.5, 0.1);
+  assert.ok(up > 0 && Math.abs(up - down) < 1e-9, `正反方向速率应该相等：${up} vs ${down}`);
+});
+
+test('摆动速率：dt 不是正数时返回 0（不能是 NaN 或 Infinity）', () => {
+  assert.equal(angularRateDegPerSec(0, 1, 0), 0);
+  assert.equal(angularRateDegPerSec(0, 1, -1), 0);
+});
+
+
+// ---------------------------------------------------------------------------
+//  指标 2：车占屏比例
+//
+//  用户实测报过「峰值速度一大，车突然变得很小」。车到底小了多少，
+//  肉眼说不准，但这个比例能直接对比 —— 而它**应该随速度基本不变**。
+// ---------------------------------------------------------------------------
+test('占屏比例：距离翻倍，占比减半', () => {
+  const near = screenFraction(1, 10, 60);
+  const far = screenFraction(1, 20, 60);
+  assert.ok(Math.abs(far - near / 2) < 1e-9, `预期 ${near / 2}，实际 ${far}`);
+});
+
+test('占屏比例：物体恰好和可见高度一样高时，占满整屏（= 1）', () => {
+  const fov = 60;
+  const d = 10;
+  const visible = 2 * d * Math.tan((fov * Math.PI) / 360);
+  const f = screenFraction(visible, d, fov);
+  assert.ok(Math.abs(f - 1) < 1e-9, `预期 1，实际 ${f}`);
+});
+
+test('占屏比例：视野越大，物体占屏越小', () => {
+  const narrow = screenFraction(1, 10, 40);
+  const wide = screenFraction(1, 10, 80);
+  assert.ok(wide < narrow, `视野大的应该占屏更小：${wide} vs ${narrow}`);
+});
+
+test('占屏比例：距离为 0 时返回 0（不能除以 0 变成 Infinity）', () => {
+  assert.equal(screenFraction(1, 0, 60), 0);
+  assert.equal(screenFraction(1, -3, 60), 0);
+});
+
+test('占屏比例：我们项目的实际数值（车高 0.9 米、距 7 米、视野 60°）约 11%', () => {
+  const f = screenFraction(0.9, 7, 60);
+  assert.ok(Math.abs(f - 0.1113) < 0.002, `预期约 0.111，实际 ${f}`);
+});
+
+
+// ===========================================================================
+//  五、整格吸附（修「开远了地面消失」的基础工具）
+//
+//  用户实测：「行驶很长一段距离之后，地上的网格消失了，只有柱子出现。」
+//  根因是地面平面有限、又不跟着车走（车开约 84 秒、1000 米就出了边缘）。
+//  修法是每帧把地面按**整格**搬到车脚下 ——
+//  必须是整数格：搬非整数格，图案就会跟着车漂，移动感又没了。
+//  这一节钉住「搬的永远是整数格」这个不变量。
+// ===========================================================================
+
+test('整格吸附：结果永远是格宽的整数倍（这才是图案不漂的关键）', () => {
+  const tile = 4;
+  for (const v of [0, 1.9, 2.1, 999.7, -1000.1, 123456.789, -3.5]) {
+    const snapped = snapToTile(v, tile);
+    const k = snapped / tile;
+    assert.ok(Math.abs(k - Math.round(k)) < 1e-9,
+      `${v} 吸附后是 ${snapped}，不是 ${tile} 的整数倍`);
+  }
+});
+
+test('整格吸附：吸附后离原坐标不超过半格（地面始终盖住车）', () => {
+  const tile = 4;
+  for (const v of [0.1, 1.9, 2.1, 999.7, -1000.1]) {
+    const offset = Math.abs(snapToTile(v, tile) - v);
+    assert.ok(offset <= tile / 2 + 1e-9, `${v} 吸附偏移 ${offset} 超过半格`);
+  }
+});
+
+test('整格吸附：本来就对齐的值纹丝不动', () => {
+  assert.equal(snapToTile(8, 4), 8);
+  assert.equal(snapToTile(-12, 4), -12);
+  assert.equal(snapToTile(0, 4), 0);
+});
+
+test('整格吸附：格宽不合法时原样返回（不能除以 0 变成 NaN）', () => {
+  assert.equal(snapToTile(5, 0), 5);
+  assert.equal(snapToTile(5, -4), 5);
 });

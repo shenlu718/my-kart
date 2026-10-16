@@ -256,3 +256,90 @@ export function cameraSideOffset(turn, yaw, amount) {
 
   return { x: rightX * signed, z: rightZ * signed };
 }
+
+
+// ---------------------------------------------------------------------------
+//  实时指标（轻量测具）
+//
+//  为什么把"测量"做成纯函数：
+//  用户的原话是「我一个人优化手感非常麻烦」。麻烦的根子不是参数多，
+//  而是**没有反馈线**——改完只能靠感觉说"好像是好一点"。
+//  参考项目（kart-royale）的作者不是靠反复试参做出手感的，
+//  他有 camera-probe 告诉他「镜头摆动 12 度/秒」「车占屏 11%」。
+//
+//  把指标的算法放进这个文件，它就能被测试钉住 ——
+//  读数对不对，先用测试确认，再相信屏幕上那串数字。
+// ---------------------------------------------------------------------------
+
+/**
+ * 角度的变化速率（度/秒）—— 用来量「镜头摆动得多猛」。
+ *
+ * 参考项目把 camera-probe 测的 swing（度/秒）当作"晕不晕"的客观指标：
+ * 镜头摆得越猛、越频繁，越容易让人不适。把它显示出来，
+ * 「相机是不是更稳了」就从感觉变成了一个可以前后对比的数字。
+ *
+ * ★ 必须走最短弧 —— 和 dampAngle 是同一个坑。
+ *   179° → -179° 实际只转了 2°，直接相减却得到 -358°，
+ *   会凭空多出一次"猛甩"，把摆动值虚报一百多倍。
+ *   Math.atan2(sin(diff), cos(diff)) 把任意角度差规整到 -π..π。
+ *
+ * @param {number} prevAngle 上一帧的角度（弧度）
+ * @param {number} curAngle 这一帧的角度（弧度）
+ * @param {number} dt 两帧之间过了多少秒
+ * @returns {number} 摆动速率（度/秒，非负；dt 不是正数时返回 0）
+ */
+export function angularRateDegPerSec(prevAngle, curAngle, dt) {
+  // dt <= 0 直接返回 0，避免除以 0 得到 Infinity/NaN 污染整个面板。
+  if (!(dt > 0)) return 0;
+  const diff = Math.atan2(Math.sin(curAngle - prevAngle), Math.cos(curAngle - prevAngle));
+  return (Math.abs(diff) * 180) / Math.PI / dt;
+}
+
+
+/**
+ * 一个尺寸为 worldSize 的物体，在屏幕上占的高度比例（0~1，1 = 占满整屏高）。
+ *
+ * 针孔相机模型：距离 d 处，一屏高（垂直方向）对应多大的世界尺寸？
+ *     可见高度 = 2 × d × tan(垂直视野 / 2)
+ * 于是物体占屏比例 = worldSize ÷ 可见高度。
+ *
+ * 为什么需要它：用户报过「峰值速度一大，车就变小」。车到底小了多少，
+ * 肉眼说不准，但这个比例能直接对比 —— 而且它**应该随速度基本不变**。
+ * 相机一旦"偷跑"变远，这个数就会如实往下掉，一眼可见。
+ *
+ * 注意：调用方要传**真实的相机到车距离**和**真实的相机 FOV**，
+ * 这样相机拉远、视野变化都会如实反映在这个读数里。
+ *
+ * @param {number} worldSize 物体的世界尺寸（米，这里用车的高度）
+ * @param {number} distance 物体到相机的距离（米）
+ * @param {number} fovDeg 相机的垂直视野（度）
+ * @returns {number} 占屏比例（0~1；distance 不为正时返回 0）
+ */
+export function screenFraction(worldSize, distance, fovDeg) {
+  if (!(distance > 0)) return 0;
+  // fovDeg/2 换算成弧度：fovDeg/2 × π/180 = fovDeg × π/360
+  const visibleHeight = 2 * distance * Math.tan((fovDeg * Math.PI) / 360);
+  if (!(visibleHeight > 0)) return 0;
+  return worldSize / visibleHeight;
+}
+
+
+/**
+ * 把一个坐标吸附到 tile 的整数倍上（"整格对齐"）。
+ *
+ * 为什么需要它：地面平面是有限的，必须跟着车搬，否则车开远了会开出边缘
+ * （用户实测：「行驶很长一段距离之后，地上的网格消失了，只有柱子出现」）。
+ * 但地面又不能随便跟着车走 —— 那样图案和车一起动，移动感就没了。
+ *
+ * 关键就是**只能搬整数格**：贴图每 tile 米重复一次，搬整数格之后
+ * 图案和世界坐标完全对齐，看起来地面钉死在世界里纹丝不动。
+ * 要是搬了非整数格，图案就会跟着漂 —— 那又回到了"图案跟着车动"的老问题。
+ *
+ * @param {number} value 坐标（米）
+ * @param {number} tile 一格多大（米），必须为正
+ * @returns {number} 最近的整格坐标（一定是 tile 的整数倍；tile 不合法时原样返回）
+ */
+export function snapToTile(value, tile) {
+  if (!(tile > 0)) return value;
+  return Math.round(value / tile) * tile;
+}
