@@ -24,6 +24,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { exec } from 'node:child_process';
+import { networkInterfaces } from 'node:os';
 
 /** 项目根目录 = 本文件所在目录 */
 const ROOT = resolve(import.meta.dirname);
@@ -44,7 +45,63 @@ const MIME = {
   '.ico': 'image/x-icon',
   '.wav': 'audio/wav',
   '.md': 'text/plain; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
 };
+
+
+// ---------------------------------------------------------------------------
+//  手机手柄的输入通道（零依赖）
+//
+//      手机页 --POST /api/input--> 这里 --SSE /api/stream--> 游戏页
+//
+//  为什么 POST 而不是 WebSocket：不需要任何依赖、不需要证书，
+//  调试时用浏览器就能看到请求。输入只有"油门/转向"两个数，够用。
+//  为什么 SSE 而不是 WebSocket 推回去：我们只需要**单向**推"当前输入"，
+//  SSE 是纯 HTTP，服务端零依赖，方向刚好对。
+//
+//  ★ 超时判定在游戏侧（src/remote-input.js，有测试）：手机切后台/锁屏时
+//    不保证发出"松手"，靠心跳 + 超时把车停下来。
+// ---------------------------------------------------------------------------
+let remoteInput = { forward: 0, turn: 0, at: 0 };
+const sseClients = new Set();
+
+function broadcastInput() {
+  const line = `data: ${JSON.stringify(remoteInput)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(line); } catch { sseClients.delete(client); }
+  }
+}
+
+/**
+ * 列出本机所有局域网 IPv4 地址，**优先真正的 WiFi 网卡**。
+ *
+ * 为什么要挑（实测踩到两次）：
+ *   ① 这台机器装了 Tailscale（100.64/10 段）→ 直接取第一个会拿到手机连不上的地址；
+ *   ② Windows 的「移动热点 / Internet 连接共享」是 192.168.137.1 的虚拟网卡，
+ *      按"192.168 优先"会把真正的 WiFi（本例是 10.2.11.122 / 网卡 WLAN）压到备选。
+ * 所以：虚拟网卡排最后，无线网卡排最前，其余私网地址居中。全部打印出来备查。
+ */
+function lanAddresses() {
+  const VIRTUAL = /tailscale|vethernet|vmware|virtualbox|hyper-?v|loopback|bluetooth|zerotier|docker|wsl/i;
+  const WIRELESS = /wlan|wi-?fi|wireless|无线|wlp|en0/i;
+  const found = [];
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni.family !== 'IPv4' || ni.internal) continue;
+      const [a, b] = ni.address.split('.').map(Number);
+      const isPrivate =
+        (a === 192 && b === 168) || a === 10 || (a === 172 && b >= 16 && b <= 31);
+      const isIcsHotspot = ni.address.startsWith('192.168.137.');
+      let score = 2;
+      if (isPrivate && !isIcsHotspot) score = 1;
+      if (WIRELESS.test(name) && !VIRTUAL.test(name)) score = 0;
+      if (VIRTUAL.test(name) || isIcsHotspot) score = 3;
+      found.push({ address: ni.address, name, score });
+    }
+  }
+  return found.sort((x, y) => x.score - y.score);
+}
 
 
 const server = http.createServer(async (req, res) => {
@@ -58,8 +115,43 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. 访问根目录就给 index.html
+  // 2. 访问根目录就给 index.html；目录也给它的 index.html（比如手机手柄页 /phone/）
   if (urlPath === '/') urlPath = '/index.html';
+  if (urlPath.endsWith('/')) urlPath += 'index.html';
+
+  // 2b. 手机手柄 API（放在文件服务之前，别被当成文件路径）
+  if (urlPath === '/api/input' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 4096) req.destroy();     // 别让畸形请求吃内存
+    });
+    req.on('end', () => {
+      let msg = null;
+      try { msg = JSON.parse(body); } catch { msg = null; }
+      const num = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0;
+      };
+      remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), at: Date.now() };
+      broadcastInput();
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
+      res.end();
+    });
+    return;
+  }
+
+  if (urlPath === '/api/stream') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Connection': 'keep-alive',
+    });
+    res.write(`data: ${JSON.stringify(remoteInput)}\n\n`);   // 连上先给当前值
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+    return;
+  }
 
   // 3. 安全检查：把路径限制在本项目里，防止 ../../ 读到项目外的文件
   const filePath = resolve(join(ROOT, normalize(urlPath)));
@@ -93,11 +185,23 @@ function openBrowser(url) {
 }
 
 
-server.listen(PORT, '127.0.0.1', () => {
+// 绑 0.0.0.0 而不是 127.0.0.1：手机要能从局域网连进来 —— 这就是做手柄的前提。
+// 代价：同一个 WiFi 下的其他设备也能访问这个开发服务器（它只服务本项目的文件、
+// 没有隐私数据，但你应该知道这件事）。不想要就把这行改回 '127.0.0.1'。
+server.listen(PORT, '0.0.0.0', () => {
   const url = `http://127.0.0.1:${PORT}`;
   console.log('');
   console.log('  ✓ 游戏已启动');
   console.log(`    地址：${url}`);
+  const lan = lanAddresses();
+  if (lan.length) {
+    console.log('');
+    console.log(`  📱 手机手柄：用手机浏览器打开  http://${lan[0].address}:${PORT}/phone/`);
+    console.log('     （手机要和这台电脑连同一个 WiFi）');
+    for (const extra of lan.slice(1)) {
+      console.log(`     备选地址： http://${extra.address}:${PORT}/phone/   [网卡 ${extra.name}]`);
+    }
+  }
   console.log('    浏览器应该已经自动打开了');
   console.log('');
   console.log('  停止服务：直接关掉这个窗口，或者按 Ctrl + C');

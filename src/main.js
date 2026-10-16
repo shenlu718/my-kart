@@ -15,10 +15,36 @@ import {
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
 import { feel, installFeel } from './feel.js';
+import { createRemoteInput, applyRemote, mergeInput, remoteIsFresh } from './remote-input.js';
 
 // 把「速度感」调参口挂到 window.__feel —— 改完**下一帧**生效，不用改代码、不用刷新。
 // 用法：__feel.punchy() / __feel.reset() / __feel.set({fovSpeed: 14}) / __feel.show()
 installFeel();
+
+
+// ---------- 0b. 手机手柄 ----------
+// 连本机 dev-server 的输入流（SSE）。断线时浏览器会自动重连。
+//
+// ★ 时刻由**这边**盖：服务器发的是它自己的 Date.now()，而这里判断"新不新鲜"
+//   用的是 performance.now()，两个时钟不是一回事。所以只取 forward/turn，
+//   "什么时候收到的"由本地时间戳记 —— 否则超时判定永远不生效。
+//   （服务器开头的 at:0 是"还没人连过"的哨兵，直接忽略。）
+let remoteInput = createRemoteInput();
+let remoteConnected = false;
+// ?nostream=1 时不连输入流 —— 给截图 / 排查用。
+// （一条永不结束的连接会让"等网络空闲"的渲染工具超时，实测过。）
+const wantRemoteStream = !new URLSearchParams(location.search).has('nostream');
+if (wantRemoteStream) {
+  try {
+    const stream = new EventSource('/api/stream');
+    stream.onmessage = (ev) => {
+      let msg = null;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (!msg || !(msg.at > 0)) return;            // 哨兵 / 畸形消息
+      remoteInput = applyRemote(remoteInput, msg, performance.now());
+    };
+  } catch { /* 没有服务器或不支持 SSE：键盘照常用 */ }
+}
 
 
 // ---------------------------------------------------------------------------
@@ -421,6 +447,7 @@ function renderPanel() {
     `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °   启用 ${(metrics.lead * 100).toFixed(0).padStart(3)} %\n` +
     `车在画面 ${(metrics.frameX >= 0 ? '+' : '') + metrics.frameX.toFixed(2)}   横移 ${metrics.offsetV.toFixed(2)} NDC/秒\n` +
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
+    `手柄     ${remoteConnected ? '✅ 手机已连接' : '—  未连接（手机打开 /phone/）'}\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
     `[ ] 距离  - = 俯角  , . 速度  P 收起面板\n` +
@@ -549,10 +576,18 @@ function frame() {
 
   // 读键盘 → 变成"意图"
   // 上和下写成相减：同时按住时 1 - 1 = 0 自然抵消，不用额外判断
-  const forwardInput = (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
-                     - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0);
-  const turnRaw = (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
+  const keyForward = (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
+                   - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0);
+  const keyTurn = (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
                 - (keys.isHeld('ArrowRight') || keys.isHeld('d') ? 1 : 0);
+
+  // 键盘 + 手机手柄合并。手机掉线超过 REMOTE_TIMEOUT_MS 会被**完全忽略** ——
+  // 这是"手机切后台车不会一直冲"的那道门（有测试钉住）。
+  const nowMs = performance.now();
+  remoteConnected = remoteIsFresh(remoteInput, nowMs);
+  const merged = mergeInput({ forward: keyForward, turn: keyTurn }, remoteInput, nowMs);
+  const forwardInput = merged.forward;
+  const turnRaw = merged.turn;
 
   // 方向盘平滑：真车打方向有个过程，不是 0 → 满舵一帧跳变。
   // 平滑后再进物理与视觉，所以反复按 A/D 不会让任何东西突变。

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 手机手柄：禁用缩放，铺满安全区，横屏最好用 -->
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<title>my-kart 手柄</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #0b1020; color: #8fb3e0;
+    font: 14px/1.5 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+  }
+  #status {
+    position: fixed; top: 0; left: 0; right: 0; padding: 6px 12px;
+    display: flex; gap: 12px; align-items: center; font-size: 13px;
+    background: #0b1020dd; border-bottom: 1px solid #24365a;
+  }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: #b04a4a; }
+  #dot.on { background: #4ac07a; }
+  #pad { position: fixed; inset: 56px 0 0 0; display: flex; }
+  /* 左右各占一半；按钮按**可用宽度均分**（用 flex 而不是固定 vw，
+     否则竖屏下两列加起来会超出屏幕、右侧被裁掉）*/
+  .side { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 2.5vw; padding: 0 2.5vw; }
+  .btn {
+    flex: 1 1 0; min-width: 0; max-width: 220px;
+    border: 2px solid #24365a; border-radius: 18px; background: #101a33;
+    color: #8fb3e0; font-size: clamp(22px, 7vw, 34px); font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    height: 68vh; max-height: 460px;
+  }
+  .btn:active, .btn.on { background: #1d4f8a; border-color: #4f9ad8; color: #eaf4ff; }
+  .btn.wide { height: 46vh; max-height: 320px; }
+  #hint {
+    position: fixed; bottom: 6px; left: 0; right: 0; text-align: center;
+    font-size: 12px; color: #4a6a9a;
+  }
+</style>
+</head>
+<body>
+  <div id="status">
+    <span id="dot"></span>
+    <span id="state">连接中…</span>
+    <span id="echo" style="margin-left:auto"></span>
+  </div>
+
+  <div id="pad">
+    <div class="side">
+      <div class="btn" data-k="turn" data-v="1">◀</div>
+      <div class="btn" data-k="turn" data-v="-1">▶</div>
+    </div>
+    <div class="side">
+      <div class="btn wide" data-k="forward" data-v="-1">刹车</div>
+      <div class="btn wide" data-k="forward" data-v="1">油门</div>
+    </div>
+  </div>
+  <div id="hint">横屏握持 · 按住不放即持续输入 · 松手立刻停</div>
+
+<script>
+// ============================================================================
+//  手机手柄 —— 把「哪个按钮按着」发回电脑上的 dev-server
+//
+//  为什么用 HTTP POST 而不是 WebSocket：
+//    不需要任何依赖、不需要证书、调试时用浏览器就能看到请求。
+//    代价是每次发一个请求；对"手上按着哪个键"这种几十毫秒级的输入足够。
+//  为什么还要心跳：手机切后台/锁屏时不保证发出"松手"事件，
+//    靠 60ms 一次的心跳，服务器那边超时（800ms）就会自动当作没在按。
+// ============================================================================
+
+const pad = document.getElementById('pad');
+const dot = document.getElementById('dot');
+const stateEl = document.getElementById('state');
+const echoEl = document.getElementById('echo');
+
+// 当前按住的按钮：键 -> 值（多个手指同时按住不同键时不会互相顶掉）
+const held = new Map();
+
+function current() {
+  let forward = 0, turn = 0;
+  for (const [k, v] of held) {
+    if (k === 'forward') forward += v;
+    if (k === 'turn') turn += v;
+  }
+  const clamp = (x) => Math.max(-1, Math.min(1, x));
+  return { forward: clamp(forward), turn: clamp(turn) };
+}
+
+let okCount = 0, failCount = 0;
+
+// ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
+const sending = !new URLSearchParams(location.search).has('nostream');
+
+async function send() {
+  if (!sending) return;
+  try {
+    const res = await fetch('/api/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(current()),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    okCount++;
+    dot.classList.add('on');
+    stateEl.textContent = '已连接';
+  } catch (e) {
+    failCount++;
+    dot.classList.remove('on');
+    stateEl.textContent = '连不上电脑（' + (e.message || e) + '）';
+  }
+  const s = current();
+  echoEl.textContent = `油门 ${s.forward}  转向 ${s.turn}`;
+}
+
+// 按下 / 松开：用 Pointer Events，天然支持多点触控
+for (const el of pad.querySelectorAll('.btn')) {
+  const key = el.dataset.k, val = Number(el.dataset.v);
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    el.setPointerCapture?.(e.pointerId);
+    held.set(e.pointerId + ':' + key, val);
+    el.classList.add('on');
+    send();
+  });
+  const up = (e) => {
+    held.delete(e.pointerId + ':' + key);
+    // 该键还有其他手指按着就保持高亮
+    const stillHeld = [...held.keys()].some((k) => k.endsWith(':' + key));
+    if (!stillHeld) el.classList.remove('on');
+    send();
+  };
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+  el.addEventListener('pointerleave', up);
+}
+
+// 心跳：既保证"松手"能被服务器感知，也用来测连接
+setInterval(send, 60);
+send();
+
+// 切到后台就当作全部松开（安全：车不该因为手机进后台而一直冲）
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { held.clear(); document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on')); send(); }
+});
+</script>
+</body>
+</html>
