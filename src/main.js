@@ -8,7 +8,10 @@
 // ============================================================================
 
 import * as THREE from '../vendor/three/three.module.js';
-import { createKartState, stepKart, camHeightOf, approachFactor, MAX_SPEED } from './kart-math.js';
+import {
+  createKartState, stepKart, camHeightOf, approachFactor,
+  followRateFor, cameraSideOffset, MAX_SPEED,
+} from './kart-math.js';
 import { createKeyState } from './keys.js';
 
 
@@ -35,6 +38,22 @@ const cam = {
  * 7 大约等于 0.14 秒追上剩余路程的一半。
  */
 const CAM_FOLLOW_RATE = 7;
+
+/**
+ * 跟随系数的速度增益：每 1 米/秒车速，系数额外加这么多。
+ *
+ * 不加这一项会怎样（用户实测发现的）：
+ *   滞后量 ≈ 车速 ÷ 系数。系数固定时，速度越快落后越多，
+ *   车在屏幕上就越来越小 ——「峰值速度一变大，车突然变得很小」。
+ * 加上增益后，滞后量收敛到 1/gain ≈ 0.67 米，不再随速度膨胀。
+ */
+const CAM_FOLLOW_GAIN = 1.5;
+
+/** 过弯时镜头往弯道外侧偏多少米（让出弯心视野，也让"路有宽度"这件事看得见） */
+const TURN_CAMERA_OFFSET = 1.2;
+
+/** 过弯时相机拉近的比例（0.1 = 拉近 10%，车看起来更大、周围参照物更少） */
+const TURN_CAMERA_ZOOM = 0.1;
 
 /**
  * 速度倍率：乘在 kart-math 的 MAX_SPEED 上。
@@ -209,6 +228,69 @@ function createGround() {
 scene.add(createGround());
 
 
+// ---------- 5b. 参照物（路桩） ----------
+/**
+ * 一圈会「循环复用」的路桩 —— 专门用来当速度的参照物。
+ *
+ * 为什么需要它（用户实测原话）：
+ *   「网格地界，我没有参照物，我无法看出速度是快还是慢，
+ *     无法修正出最佳的峰值速度。」
+ *
+ * 说得完全对：**速度感不来自速度数值，来自旁边东西掠过的频率。**
+ * 空荡荡的世界里，开 10 米/秒和开 30 米/秒看起来一模一样。
+ *
+ * 怎么做到"看起来无限"：不做真的无限，只在车周围铺一圈固定数量的桩子。
+ * 车往前走，就把落到身后的桩子搬到身前 —— 玩家看到的永远是满满一圈。
+ * 这是游戏里做无限地形、无限星空、无限公路的通用手法：
+ * **复用一小批物体，让它们围着玩家循环**。
+ *
+ * 注意：桩子必须锚在**世界坐标**上（车动、它们不动），否则就跟之前
+ * "让网格跟着车走"一样——图案和车一起动，移动感立刻消失。
+ */
+// 用偶数：格子中心正好错开原点，开局就不会有一根桩子压在车身上
+const POST_GRID = 12;                            // 每边铺几个（12×12 = 144 个）
+const POST_SPACING = 12;                         // 桩子间距（米）
+const POST_HALF = (POST_GRID * POST_SPACING) / 2; // 覆盖半径，72 米
+
+function createPosts() {
+  const geo = new THREE.CylinderGeometry(0.14, 0.22, 1.8, 6);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x41618f, roughness: 0.85 });
+
+  const half = POST_GRID / 2;
+  const list = [];
+
+  for (let i = 0; i < POST_GRID; i++) {
+    for (let j = 0; j < POST_GRID; j++) {
+      const post = new THREE.Mesh(geo, mat);
+      // 初始均匀铺在格子上，之后靠"搬运"维持
+      post.position.set(
+        (i - half + 0.5) * POST_SPACING,
+        0.9,
+        (j - half + 0.5) * POST_SPACING
+      );
+      scene.add(post);
+      list.push(post);
+    }
+  }
+  return list;
+}
+
+const posts = createPosts();
+
+/** 每帧把落到身后（超出覆盖范围）的桩子搬到身前 */
+function updatePosts(carX, carZ) {
+  for (const post of posts) {
+    const dx = post.position.x - carX;
+    if (dx > POST_HALF) post.position.x -= POST_HALF * 2;
+    else if (dx < -POST_HALF) post.position.x += POST_HALF * 2;
+
+    const dz = post.position.z - carZ;
+    if (dz > POST_HALF) post.position.z -= POST_HALF * 2;
+    else if (dz < -POST_HALF) post.position.z += POST_HALF * 2;
+  }
+}
+
+
 // ---------- 6. 灯光 ----------
 const sun = new THREE.DirectionalLight(0xffffff, 3);
 sun.position.set(4, 8, 6);
@@ -330,19 +412,32 @@ function frame() {
     w.mesh.rotation.x = wheelRoll;                                    // 四个轮子都在滚
   }
 
+  // ---- 参照物跟着循环（把落到身后的桩子搬到身前）----
+  updatePosts(state.x, state.z);
+
   // ---- 相机 ----
-  // 该在的位置：车后上方。车头朝 (-sin, 0, -cos)，所以"车后"是 (+sin, 0, +cos)
+  // 过弯时把镜头往**弯道外侧**偏一点：于是车在画面上偏向弯心一侧，
+  // 让出弯心的视野 —— 同时让玩家感觉到"这条路是有宽度的"。
+  const side = cameraSideOffset(input.turn, state.yaw, TURN_CAMERA_OFFSET);
+
+  // 过弯时稍微拉近一点，视野聚焦在车上、周围参照物少露一些
+  const distanceNow = cam.distance * (1 - Math.abs(input.turn) * TURN_CAMERA_ZOOM);
+  const heightNow = distanceNow * Math.tan((cam.angleDeg * Math.PI) / 180);
+
   camTarget.set(
-    state.x + Math.sin(state.yaw) * cam.distance,
-    camHeightOf(cam),
-    state.z + Math.cos(state.yaw) * cam.distance
+    state.x + Math.sin(state.yaw) * distanceNow + side.x,
+    heightNow,
+    state.z + Math.cos(state.yaw) * distanceNow + side.z
   );
 
   // 平滑地逼近那个位置，而不是每帧硬贴上去。
   // 相机会稍微"落后"一点：加速时被甩开、停下时慢慢跟上——
   // 这一点点滞后就是速度感的来源；硬跟会让画面僵硬死板。
-  // 用 approachFactor 而非固定比例，保证不同帧率下跟随速度一致。
-  camera.position.lerp(camTarget, approachFactor(CAM_FOLLOW_RATE, dt));
+  //
+  // 但系数必须随速度自适应：固定系数时速度越快落后越多、车就越小
+  //（用户实测发现的「峰值速度一变大，车突然变得很小」）。
+  const followRate = followRateFor(state.speed, CAM_FOLLOW_RATE, CAM_FOLLOW_GAIN);
+  camera.position.lerp(camTarget, approachFactor(followRate, dt));
 
   camera.lookAt(state.x, 0.3, state.z);
 

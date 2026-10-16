@@ -160,3 +160,53 @@ export function camHeightOf(cam) {
 export function approachFactor(rate, dt) {
   return 1 - Math.exp(-rate * dt);
 }
+
+
+/**
+ * 相机跟随的速度系数 —— 随车速自适应。
+ *
+ * 为什么需要自适应？
+ * 平滑跟随必然带来滞后，而滞后量 ≈ 车速 ÷ 跟随系数。
+ * 系数固定时，速度越快、相机落后越多，车在屏幕上就越小：
+ *
+ *     系数 7，速度 8  → 落后 1.1 米（相机距车 8.1 米）
+ *     系数 7，速度 24 → 落后 3.4 米（相机距车 10.4 米，车小了一圈）
+ *
+ * 这是用户实测发现的："峰值速度变大时相机就拉远，车突然变得很小"。
+ * 让系数跟着速度一起涨，滞后量就能基本保持恒定。
+ *
+ * @param {number} speed 当前车速（米/秒，倒车为负）
+ * @param {number} base 静止时的跟随系数
+ * @param {number} gain 每 1 米/秒速度额外增加多少系数
+ * @returns {number} 这一帧该用的跟随系数
+ */
+export function followRateFor(speed, base, gain) {
+  return base + Math.abs(speed) * gain;
+}
+
+
+/**
+ * 算出相机应该往车的哪一侧偏多少 —— 过弯时用。
+ *
+ * 为什么需要它：
+ * 把车永远钉在画面正中时，右转弯时右边（弯心那一侧）的视野被车挡住了。
+ * 真实赛车游戏会让镜头往**弯道外侧**偏一点，于是车在画面上偏向弯心一侧，
+ * 把弯心的视野让出来 —— 这也让玩家能感觉到"赛道是有宽度的"。
+ *
+ * @param {number} turn +1 左转，-1 右转，0 直行
+ * @param {number} yaw 车头朝向（弧度）
+ * @param {number} amount 最大偏移距离（米）
+ * @returns {{x:number, z:number}} 相机位置相对车后方的额外偏移
+ */
+export function cameraSideOffset(turn, yaw, amount) {
+  // 车的"右方"单位向量。
+  // yaw = 0 时车头朝 -Z，它的右方是 +X；绕 Y 轴转 yaw 之后就是：
+  const rightX = Math.cos(yaw);
+  const rightZ = -Math.sin(yaw);
+
+  // 左转（turn = +1）时相机要往**左**偏，也就是右方取负。
+  // 于是车在画面上偏向右侧 —— 弯心（左边）的视野让出来了。
+  const signed = -turn * amount;
+
+  return { x: rightX * signed, z: rightZ * signed };
+}

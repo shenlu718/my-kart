@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createKartState, stepKart, nextSpeed,
-  camHeightOf, approachFactor,
+  camHeightOf, approachFactor, followRateFor, cameraSideOffset,
   MAX_SPEED, REVERSE_SPEED, ACCEL, TURN_SPEED,
 } from './kart-math.js';
 
@@ -282,4 +282,61 @@ test('平滑逼近：dt = 0 时纹丝不动，dt 很大时几乎贴到目标', (
   assert.ok(approachFactor(7, 10) > 0.99, '经过很久应该基本到位');
   assert.ok(approachFactor(7, 0.016) > 0 && approachFactor(7, 0.016) < 0.2,
     '一帧（16ms）的变化应该是很小的一步');
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 11：跟随系数随速度自适应
+//
+//  用户实测发现：「峰值速度变得很大时，相机会拉远，车突然变得很小」。
+//  根因是滞后量 ≈ 速度 ÷ 跟随系数，系数固定时速度越快落后越多。
+//  这条钉住「速度越快、跟得越紧」这个性质。
+// ---------------------------------------------------------------------------
+test('跟随系数随速度变大：速度越快，相机跟得越紧', () => {
+  const atRest = followRateFor(0, 7, 1.5);
+  const cruising = followRateFor(8, 7, 1.5);
+  const flying = followRateFor(24, 7, 1.5);
+
+  assert.equal(atRest, 7, '静止时就用基准系数');
+  assert.ok(cruising > atRest, '速度上去后应该跟得更紧');
+  assert.ok(flying > cruising, '速度越快跟得越紧');
+
+  // 关键性质：滞后量（速度 ÷ 系数）不再随速度线性增长，
+  // 而是收敛到一个上限。数学上：速度/(base+gain×速度) 在速度很大时趋近 1/gain。
+  // 这也正是不让"速度一快、车就变小"的关键。
+  const ceiling = 1 / 1.5;   // ≈ 0.67 米
+  assert.ok(8 / cruising < ceiling + 1e-9, `8m/s 的滞后该在 ${ceiling.toFixed(2)}m 以内`);
+  assert.ok(24 / flying < ceiling + 1e-9, `24m/s 的滞后该在 ${ceiling.toFixed(2)}m 以内`);
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 12：过弯时的镜头偏移方向
+//  这类"左右"最容易搞反，而且搞反了在画面上不一定看得出来（车还是在动）。
+// ---------------------------------------------------------------------------
+test('过弯镜头往弯道外侧偏：左转往左偏，右转往右偏，直行不偏', () => {
+  const amount = 2;
+
+  const straight = cameraSideOffset(0, 0, amount);
+  // 用 === 而不是 assert.equal：后者背后是 Object.is，
+  // 而 Object.is(-0, 0) 是 false —— JS 的这个怪癖会让"直行不偏移"误报失败。
+  assert.ok(straight.x === 0, `直行不该偏移，实际 ${straight.x}`);
+  assert.ok(straight.z === 0, `直行不该偏移，实际 ${straight.z}`);
+
+  // yaw = 0 时车头朝 -Z，车的右方是 +X
+  const left = cameraSideOffset(1, 0, amount);    // 左转
+  assert.ok(left.x < 0, `左转时相机该往 -X（左侧）偏，实际 ${left.x}`);
+
+  const right = cameraSideOffset(-1, 0, amount);  // 右转
+  assert.ok(right.x > 0, `右转时相机该往 +X（右侧）偏，实际 ${right.x}`);
+});
+
+test('镜头偏移跟着车头转向：车头转 90° 后，偏移方向也跟着转', () => {
+  const amount = 2;
+
+  // yaw = 90°：车头朝 -X，此时车的右方是 -Z
+  const right = cameraSideOffset(-1, Math.PI / 2, amount);
+
+  assert.ok(Math.abs(right.x) < 1e-9, `x 应该接近 0，实际 ${right.x}`);
+  assert.ok(right.z < 0, `应该往 -Z 偏，实际 ${right.z}`);
 });
