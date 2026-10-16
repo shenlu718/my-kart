@@ -48,46 +48,39 @@
 
   <div id="pad">
     <div class="side">
-      <div class="btn" data-k="turn" data-v="1">◀</div>
-      <div class="btn" data-k="turn" data-v="-1">▶</div>
+      <div class="btn" data-hold="left">◀</div>
+      <div class="btn" data-hold="right">▶</div>
     </div>
     <div class="side">
-      <div class="btn wide" data-k="forward" data-v="-1">刹车</div>
-      <div class="btn wide" data-k="forward" data-v="1">油门</div>
+      <div class="btn wide" data-hold="brake">刹车</div>
+      <div class="btn wide" data-hold="accel">油门</div>
     </div>
   </div>
   <div id="hint">横屏握持 · 按住不放即持续输入 · 松手立刻停</div>
 
-<script>
+<script type="module">
 // ============================================================================
-//  手机手柄 —— 把「哪个按钮按着」发回电脑上的 dev-server
+//  手机手柄 —— 把「哪个手指按着哪个键」发回电脑上的 dev-server
+//
+//  ★ 按钮 → 输入的映射在 src/pad-input.js（纯模块，有 9 条单元测试）。
+//    之前这段内联在这里，键写错了一个字导致"按了没反应"，
+//    而浏览器里没有测试、只看语法检查发现不了。现在映射在可测的那一侧。
 //
 //  为什么用 HTTP POST 而不是 WebSocket：
 //    不需要任何依赖、不需要证书、调试时用浏览器就能看到请求。
-//    代价是每次发一个请求；对"手上按着哪个键"这种几十毫秒级的输入足够。
 //  为什么还要心跳：手机切后台/锁屏时不保证发出"松手"事件，
-//    靠 60ms 一次的心跳，服务器那边超时（800ms）就会自动当作没在按。
+//    靠 60ms 一次的心跳，服务器那边超时（800ms）就自动当作没在按。
 // ============================================================================
 
-const pad = document.getElementById('pad');
+import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput }
+  from '/src/pad-input.js';
+
+const padEl = document.getElementById('pad');
 const dot = document.getElementById('dot');
 const stateEl = document.getElementById('state');
 const echoEl = document.getElementById('echo');
 
-// 当前按住的按钮：键 -> 值（多个手指同时按住不同键时不会互相顶掉）
-const held = new Map();
-
-function current() {
-  let forward = 0, turn = 0;
-  for (const [k, v] of held) {
-    if (k === 'forward') forward += v;
-    if (k === 'turn') turn += v;
-  }
-  const clamp = (x) => Math.max(-1, Math.min(1, x));
-  return { forward: clamp(forward), turn: clamp(turn) };
-}
-
-let okCount = 0, failCount = 0;
+const pad = createPadState();
 let seq = 0;   // 包序号：让游戏侧能丢弃乱序/迟到的旧包（否则转向会抖）
 
 // ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
@@ -95,23 +88,21 @@ const sending = !new URLSearchParams(location.search).has('nostream');
 
 async function send() {
   if (!sending) return;
+  const input = padInput(pad);   // ← 唯一的事实来源，和测试跑同一份代码
   try {
     const res = await fetch('/api/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...current(), seq: seq++ }),
+      body: JSON.stringify({ ...input, seq: seq++ }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    okCount++;
     dot.classList.add('on');
     stateEl.textContent = '已连接';
   } catch (e) {
-    failCount++;
     dot.classList.remove('on');
     stateEl.textContent = '连不上电脑（' + (e.message || e) + '）';
   }
-  const s = current();
-  echoEl.textContent = `油门 ${s.forward}  转向 ${s.turn}`;
+  echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn}`;
 }
 
 // 按下 / 松开：用 Pointer Events，天然支持多点触控
@@ -119,46 +110,39 @@ async function send() {
 // ★ 松手要听三个事件，缺一不可（照参考项目的做法）：
 //   pointerup / pointercancel / **lostpointercapture**
 //   少了 lostpointercapture：一旦捕获被系统收走（来电、通知、手势冲突），
-//   按钮会永远停在"按着"，车就一直冲 —— 这是实测过的真 bug。
-//   另外**不听 pointerleave**：捕获之后手指滑出按钮不该算松手，
-//   否则滑一下就会突然断油门。
-for (const el of pad.querySelectorAll('.btn')) {
-  const key = el.dataset.k, val = Number(el.dataset.v);
+//   按钮会永远停在"按着"，车就一直冲。
+//   另外**不听 pointerleave**：捕获之后手指滑出按钮不该算松手。
+for (const el of padEl.querySelectorAll('[data-hold]')) {
+  const action = el.dataset.hold;
+
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     el.setPointerCapture?.(e.pointerId);
-    held.set(e.pointerId + ':' + key, val);
+    pressAction(pad, e.pointerId, action);
     el.classList.add('on');
     send();
   });
-  const up = (e) => {
-    if (!held.has(e.pointerId + ':' + key)) return;
-    held.delete(e.pointerId + ':' + key);
-    const stillHeld = [...held.keys()].some((k) => k.endsWith(':' + key));
-    if (!stillHeld) el.classList.remove('on');
+
+  const release = (e) => {
+    releaseContact(pad, e.pointerId);
+    if (!isHeld(pad, action)) el.classList.remove('on');   // 还有别的手指按着就保持高亮
     send();
   };
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-    el.addEventListener(name, up);
+    el.addEventListener(name, release);
   }
+}
+
+/** 一次松开所有按钮（切后台、页面隐藏、出错时都走它） */
+function releaseEverything() {
+  releaseAll(pad);
+  document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on'));
+  send();
 }
 
 // 心跳：既保证"松手"能被服务器感知，也用来测连接
 setInterval(send, 60);
 send();
-
-// 切到后台就当作全部松开（安全：车不该因为手机进后台而一直冲）
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { releaseAll(); }
-  else { requestWakeLock(); }   // 回到前台再要一次：锁在切后台时会被系统释放
-});
-
-/** 一次松开所有按钮（切后台、页面隐藏、出错时都走它） */
-function releaseAll() {
-  held.clear();
-  document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on'));
-  send();
-}
 
 // ★ 屏幕常亮（照参考项目）：不然玩到一半手机息屏 —— 操控直接断。
 //   注意：锁会在页面切到后台时被系统自动释放，所以回前台要重新申请。
@@ -170,6 +154,12 @@ async function requestWakeLock() {
   } catch { /* 不支持就算了，不影响玩 */ }
 }
 requestWakeLock();
+
+// 切到后台就当作全部松开（安全：车不该因为手机进后台而一直冲）
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseEverything();
+  else requestWakeLock();
+});
 </script>
 </body>
 </html>
