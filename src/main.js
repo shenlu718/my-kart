@@ -10,7 +10,9 @@
 import * as THREE from '../vendor/three/three.module.js';
 import {
   createKartState, stepKart, camHeightOf, damp, dampAngle,
-  cameraSideOffset, angularRateDegPerSec, screenFraction, snapToTile, MAX_SPEED,
+  angularRateDegPerSec, screenFraction, snapToTile,
+  fovForSpeed, ndcFromAngle,
+  MAX_SPEED, MAX_STEER,
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
@@ -58,11 +60,51 @@ const CAM_YAW_TAU = 0.16;
  */
 const TURN_SMOOTH_TAU = 0.14;
 
-/** 过弯时镜头往弯道外侧偏多少米（让出弯心视野，也让"路有宽度"这件事看得见） */
-const TURN_CAMERA_OFFSET = 1.2;
+// ---------------------------------------------------------------------------
+//  过弯构图（照参考项目 Camera.ts 的 frameSubject / frameX / frameY）
+//
+//  ★ 为什么推倒重来：
+//  旧做法是「过弯把相机往弯外平移 1.2 米」。可它下一行就是 camera.lookAt(车)，
+//  lookAt 每帧把车拽回画面正中 —— 平移等于白做。用户实测原话：
+//    「镜头的偏移并没有产生对于行驶手感的优化，我只看到机械的参数在运行，
+//      只是做了表面工作……为什么车辆转弯的时候，车子会一直处于屏幕的中间？」
+//
+//  正解是「构图解算」：**不要 lookAt 车**，而是构造出一条视线，让车**恰好落在**
+//  屏幕的指定位置上（参考实现的 frameSubject：把 eye→车 的射线按
+//  atan(fx·tanH) / atan(fy·tanV) 旋转）。于是：
+//    ① 车不再被钉在正中；
+//    ② 过弯时镜头领进弯道——车因此偏出中心，弯内一侧的视野让出来；
+//    ③ 「车跑出画面」不再是可能发生的失败模式（fx 有硬上限）。
+//
+//  横向 fx 由「方位角滞后」驱动：右弯时方位角拖在车头左侧 → 镜头回摆 →
+//  车落到画面偏左、右侧（弯内）的路看得到。这正是用户描述的那种驾驶视角。
+// ---------------------------------------------------------------------------
+/** 抵消多少比例的方位角滞后 → 静态时留下几度真实滞后，其余进画面（参考值 0.72） */
+const CAM_FRAME_LAG_CANCEL = 0.72;
+/** 构图角变化速率上限（rad/s）—— 防止朝向突变变成一记猛甩 */
+const CAM_FRAME_ANG_RATE = 0.85;
+/** 横向构图硬上限（NDC）。超过约 1/3 个半屏，主体就不像主体了（参考值 0.30） */
+const CAM_FRAME_X_MAX = 0.30;
+/** 车压在画面下半，把上半屏让给前方的路（参考值 -0.19） */
+const CAM_FRAME_Y = -0.19;
+/** 速度越快再压低一点，进一步把视线推向前方 */
+const CAM_FRAME_Y_SPEED = -0.05;
+const CAM_FRAME_Y_MIN = -0.32;
+const CAM_FRAME_Y_MAX = -0.08;
+/** 构图参照点离地高度（米）—— 车体中部，不是地面 */
+const CAM_SUBJ_UP = 0.45;
 
-/** 过弯时相机拉近的比例（0.1 = 拉近 10%，车看起来更大、周围参照物更少） */
-const TURN_CAMERA_ZOOM = 0.1;
+// ---------------------------------------------------------------------------
+//  速度感：视野（FOV）随速度张开
+//
+//  用户实测原话：「我看不到有加速度的趋势，手感很差。」
+//  数值上的速度再高，画面上没有变化就等于看不见。参考项目靠张开**视野**
+//  （而不是拉长臂长——那会把主体固定成同一个大小，反而看不出速度）。
+// ---------------------------------------------------------------------------
+/** 静止时的垂直视野（度）—— 和原来一样 */
+const FOV_BASE = 60;
+/** 满速时额外张开多少度（参考项目 FOV_SPEED 是 5，这里给大一点更明显） */
+const FOV_SPEED = 8;
 
 /**
  * 速度倍率：乘在 kart-math 的 MAX_SPEED 上。
@@ -74,9 +116,6 @@ const TURN_CAMERA_ZOOM = 0.1;
  * 「底层定基准、上层调口味」是很常见的分层方式。
  */
 let speedScale = 1.5;
-
-/** 前轮的最大摆角（视觉用）。30° 已经很明显了 */
-const MAX_STEER_VISUAL = Math.PI / 6;
 
 /** 轮子半径，用来算滚动的圈数 */
 const WHEEL_RADIUS = 0.25;
@@ -380,8 +419,9 @@ const metrics = {
   swing: 0,        // 相机摆动（度/秒，已平滑）
   swingPeak: 0,    // 相机摆动 1 秒内的峰值（度/秒）—— 看「最猛的一下有多猛」
   framing: 0,      // 车占屏比例（0~1）
-  turnOffset: 0,   // 过弯镜头偏移（米）
-  zoom: 0,         // 过弯拉近比例（0~1）
+  fov: 0,          // 当前垂直视野（度）—— 随速度张开
+  leadDeg: 0,      // 镜头领入角（度）—— 过弯时镜头往弯内转了多少
+  frameX: 0,       // 车在屏幕上的横向位置（NDC，0 = 正中；负 = 偏左）
 };
 
 /**
@@ -403,9 +443,10 @@ function renderPanel() {
   const text =
     `— 实时指标 —\n` +
     `车速     ${metrics.speed.toFixed(1).padStart(5)} 米/秒   ${(metrics.speed * 3.6).toFixed(0).padStart(4)} km/h\n` +
+    `视野     ${metrics.fov.toFixed(1).padStart(5)} °      （速度感来源）\n` +
     `相机摆动 ${metrics.swing.toFixed(0).padStart(5)} °/s   峰值 ${metrics.swingPeak.toFixed(0).padStart(5)} °/s\n` +
+    `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °     车在画面 ${metrics.frameX >= 0 ? '+' : ''}${metrics.frameX.toFixed(2)}\n` +
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
-    `过弯偏移 ${metrics.turnOffset.toFixed(2).padStart(5)} 米   拉近 ${(metrics.zoom * 100).toFixed(0).padStart(3)} %\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
     `[ ] 距离  - = 俯角  , . 速度  P 收起面板`;
@@ -448,8 +489,15 @@ const clock = new THREE.Clock();   // 用来量"距上一帧过了多少秒"
 /** 相机坐在车后方的方位角。它弹簧式地追车的朝向 —— 那点滞后就是"镜头摆动感" */
 let camYaw = 0;
 
-/** 平滑后的转向量：相机参数一律用它，不用瞬时按键值（否则相机在追一个会跳的目标） */
+/**
+ * 平滑后的转向量。
+ * 方向盘不该是 0/1 跳变的：真车打方向有个过程。它现在直接喂给 stepKart
+ * 当前轮转角（顺带也抹掉了按键跳变），前轮的视觉摆角也用同一个值。
+ */
 let turnSmooth = 0;
+
+/** 构图角（弧度）—— 镜头相对车头方向偏转多少，用来把车摆到画面的非中心位置 */
+let compAng = 0;
 
 /** 上一帧的方位角 —— 用来算「摆动速率」（本帧与上帧之差 ÷ dt） */
 let prevCamYaw = 0;
@@ -460,6 +508,54 @@ let swingPeak = 0;
 
 /** 复用一个临时点，避免每帧 new 一个 Vector3（减少垃圾回收压力） */
 const kartPoint = new THREE.Vector3();
+
+
+// ---------------------------------------------------------------------------
+//  构图解算 —— 让车「恰好落在」屏幕的指定位置（照参考 Camera.ts 的 frameSubject）
+//
+//  给定相机位置和车的位置，求一条视线，使车投影到 NDC = (fx, fy)。
+//  做法：从 eye→车 的射线出发，先绕「上」轴转 atan(fx·tanH)，再绕新的「右」轴
+//  转 -atan(fy·tanV)。两次旋转不严格可交换，但在这个角度下耦合误差不到
+//  五分之一度（参考实现的原注）。
+//
+//  ★ 这就是「车不再永远在屏幕正中」的实现：车在画面上的位置是**输入**，
+//    不是碰巧——所以「车跑出画面」不再是可能发生的失败模式。
+// ---------------------------------------------------------------------------
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const _subj = new THREE.Vector3();
+const _viewDir = new THREE.Vector3();
+const _rt = new THREE.Vector3();
+const _upV = new THREE.Vector3();
+const _aimPt = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+
+/** 把相机摆到「看得到车落在 NDC (fx, fy)」的朝向 */
+function frameSubject(camObj, sx, sy, sz, fx, fy, tanV, tanH) {
+  _subj.set(sx, sy, sz);
+  _viewDir.subVectors(_subj, camObj.position);
+  const r = _viewDir.length();
+  if (r < 1e-3) { camObj.lookAt(_subj); return; }
+  _viewDir.multiplyScalar(1 / r);
+
+  _rt.crossVectors(_viewDir, WORLD_UP);
+  if (_rt.lengthSq() < 1e-6) { camObj.lookAt(_subj); return; }
+  _rt.normalize();
+  _upV.crossVectors(_rt, _viewDir).normalize();
+
+  // 先偏航，再俯仰（顺序与参考实现一致）
+  _q.setFromAxisAngle(_upV, Math.atan(fx * tanH));
+  _viewDir.applyQuaternion(_q);
+
+  _rt.crossVectors(_viewDir, WORLD_UP);
+  if (_rt.lengthSq() > 1e-6) {
+    _rt.normalize();
+    _q.setFromAxisAngle(_rt, -Math.atan(fy * tanV));
+    _viewDir.applyQuaternion(_q);
+  }
+
+  _aimPt.copy(camObj.position).addScaledVector(_viewDir, r);
+  camObj.lookAt(_aimPt);
+}
 
 
 // ---------- 8b. 相机的初始位置 ----------
@@ -481,15 +577,19 @@ function frame() {
 
   // 读键盘 → 变成"意图"
   // 上和下写成相减：同时按住时 1 - 1 = 0 自然抵消，不用额外判断
-  const input = {
-    forward: (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
-           - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0),
-    turn: (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
-        - (keys.isHeld('ArrowRight') || keys.isHeld('d') ? 1 : 0),
-  };
+  const forwardInput = (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
+                     - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0);
+  const turnRaw = (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
+                - (keys.isHeld('ArrowRight') || keys.isHeld('d') ? 1 : 0);
 
-  // 算新状态（这一步有 kart-math 的 22 个测试护航）。
-  // 速度倍率乘在「峰值速度」上，而不是乘在油门上——
+  // 方向盘平滑：真车打方向有个过程，不是 0 → 满舵一帧跳变。
+  // 平滑后再进物理与视觉，所以反复按 A/D 不会让任何东西突变。
+  turnSmooth = damp(turnSmooth, turnRaw, TURN_SMOOTH_TAU, dt);
+
+  const input = { forward: forwardInput, turn: turnSmooth };
+
+  // 算新状态。转向由 kart-math 的阿克曼模型算：偏航率 ∝ 车速，
+  // 所以停着打方向车不会原地转。速度倍率乘在「峰值速度」上，而不是乘在油门上——
   // 那样只是让车更快到顶，不会真的更快。
   state = stepKart(state, input, dt, MAX_SPEED * speedScale);
 
@@ -502,7 +602,7 @@ function frame() {
   // 倒车时 speed 是负的，轮子自然反过来转。
   wheelRoll += (state.speed * dt) / WHEEL_RADIUS;
   for (const w of wheels) {
-    if (w.pivot) w.pivot.rotation.y = input.turn * MAX_STEER_VISUAL; // 前轮跟着方向盘摆
+    if (w.pivot) w.pivot.rotation.y = turnSmooth * MAX_STEER;      // 前轮摆角 = 真实转向角
     w.mesh.rotation.x = wheelRoll;                                    // 四个轮子都在滚
   }
 
@@ -514,36 +614,47 @@ function frame() {
 
   // ---- 相机 ----
   //
-  // 架构（照参考项目 kart-royale 的做法）：
-  //   平滑只放两处 —— ① 方位角 camYaw  ② 转向标量 turnSmooth。
-  //   相机位置**精确算出**，不加位置弹簧。
-  //
-  //   为什么不能加位置弹簧：追一个移动目标的弹簧会留下 |v|×T 的稳态误差，
-  //   速度越快落后越多 —— 那正是"峰值速度一大、车就变小"的根因。
-  //   把滞后挪到方位角上，就只影响镜头摆动，不改变相机到车的距离。
+  // 架构（照参考项目 kart-royale）：
+  //   ① 方位角 camYaw 弹簧式追车头（唯一该有滞后的地方）
+  //   ② 视野 FOV 随速度张开（速度感来源）
+  //   ③ 位置精确算出，不加位置弹簧（弹簧有 |v|×T 的稳态误差，
+  //      速度一快车就变小 —— 踩过的坑）
+  //   ④ 朝向用「构图解算」而不是 lookAt(车)：车落在**指定**的屏幕位置
 
-  // ① 平滑转向输入：抹掉按键的 0/1 跳变（"忽大忽小"的直接原因就在这）
-  turnSmooth = damp(turnSmooth, input.turn, TURN_SMOOTH_TAU, dt);
-
-  // ② 方位角弹簧式追车的朝向。滞后 = 镜头摆动感（这是想要的），
+  // ① 方位角弹簧式追车的朝向。滞后 = 镜头摆动感（这是想要的），
   //    走最短弧，所以跨过 ±180° 时不会绕一大圈。
   camYaw = dampAngle(camYaw, state.yaw, CAM_YAW_TAU, dt);
 
-  // ③ 过弯时把镜头往**弯道外侧**偏一点，让车偏向弯心一侧、把弯心视野让出来
-  const side = cameraSideOffset(turnSmooth, state.yaw, TURN_CAMERA_OFFSET);
+  // ② 视野随速度张开：加速时画面往外撑，这才"看得见加速度"
+  const fovNow = fovForSpeed(FOV_BASE, FOV_SPEED, state.speed, MAX_SPEED * speedScale);
+  if (Math.abs(camera.fov - fovNow) > 1e-3) {
+    camera.fov = fovNow;
+    camera.updateProjectionMatrix();
+  }
 
-  // ④ 过弯时稍微拉近（车更大、周围参照物少露一些），同样用平滑量
-  const distanceNow = cam.distance * (1 - Math.abs(turnSmooth) * TURN_CAMERA_ZOOM);
-  const heightNow = distanceNow * Math.tan((cam.angleDeg * Math.PI) / 180);
+  // ③ 构图角：抵消一部分方位角滞后 → 镜头领进弯道、车因此偏出画面中心。
+  //    （右弯时方位角拖在车头左侧 → bearingLag>0 → 构图角为负 → 车偏左，
+  //      右侧弯内的路就看得见了 —— 这就是"驾驶视角"。）
+  const bearingLag = Math.atan2(Math.sin(camYaw - state.yaw), Math.cos(camYaw - state.yaw));
+  const wantComp = -CAM_FRAME_LAG_CANCEL * bearingLag;
+  compAng += Math.max(-CAM_FRAME_ANG_RATE * dt,
+             Math.min(CAM_FRAME_ANG_RATE * dt, wantComp - compAng));
 
-  // ⑤ 位置精确算出 —— 不加弹簧
+  // ④ 位置精确算出 —— 不加弹簧
+  const heightNow = camHeightOf(cam);
   camera.position.set(
-    state.x + Math.sin(camYaw) * distanceNow + side.x,
+    state.x + Math.sin(camYaw) * cam.distance,
     heightNow,
-    state.z + Math.cos(camYaw) * distanceNow + side.z
+    state.z + Math.cos(camYaw) * cam.distance
   );
 
-  camera.lookAt(state.x, 0.3, state.z);
+  // ⑤ 朝向：把车摆到屏幕的 (fx, fy)，而不是让它永远居中
+  const tanV = Math.tan((camera.fov * Math.PI) / 360);
+  const tanH = tanV * camera.aspect;
+  const sp = Math.min(1, Math.abs(state.speed) / (MAX_SPEED * speedScale));
+  const frameX = Math.max(-CAM_FRAME_X_MAX, Math.min(CAM_FRAME_X_MAX, ndcFromAngle(compAng, tanH)));
+  const frameY = Math.max(CAM_FRAME_Y_MIN, Math.min(CAM_FRAME_Y_MAX, CAM_FRAME_Y + CAM_FRAME_Y_SPEED * sp));
+  frameSubject(camera, state.x, CAM_SUBJ_UP, state.z, frameX, frameY, tanV, tanH);
 
   // ---- 实时指标（轻量测具）----
   // 为什么显示这几项：手感是主观的，但它的变化是客观的。
@@ -559,12 +670,13 @@ function frame() {
   kartPoint.set(state.x, KART_CENTER_Y, state.z);
   metrics.framing = screenFraction(KART_REF_HEIGHT, camera.position.distanceTo(kartPoint), camera.fov);
 
-  // ③ 过弯镜头偏移（米）与拉近比例 —— 直接来自平滑后的转向量
-  metrics.turnOffset = Math.abs(turnSmooth) * TURN_CAMERA_OFFSET;
-  metrics.zoom = Math.abs(turnSmooth) * TURN_CAMERA_ZOOM;
+  // ③ 构图读数：镜头领入多少度、车落在画面哪个横向位置
+  metrics.leadDeg = (compAng * 180) / Math.PI;
+  metrics.frameX = frameX;
 
-  // ④ 车速 / 摆动读数
+  // ④ 车速 / 视野 / 摆动读数
   metrics.speed = state.speed;
+  metrics.fov = camera.fov;
   metrics.swing = swingSmooth;
   metrics.swingPeak = swingPeak;
 

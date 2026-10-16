@@ -12,9 +12,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createKartState, stepKart, nextSpeed,
-  camHeightOf, approachFactor, followRateFor, cameraSideOffset, damp, dampAngle,
+  camHeightOf, approachFactor, followRateFor, damp, dampAngle,
   angularRateDegPerSec, screenFraction, snapToTile,
-  MAX_SPEED, REVERSE_SPEED, ACCEL, TURN_SPEED,
+  yawRateFor, fovForSpeed, ndcFromAngle,
+  MAX_SPEED, REVERSE_SPEED, ACCEL,
+  WHEELBASE, HALF_BASE, MAX_STEER,
 } from './kart-math.js';
 
 
@@ -70,13 +72,13 @@ test('倒车：朝 +Z 方向后退', () => {
 //  参考项目里就出过这个 bug：转向反了，但截图完全看不出来，骗过三轮审查。
 // ---------------------------------------------------------------------------
 test('左转（turn = +1）：朝向角增大', () => {
-  const s = stepKart(createKartState(), { forward: 0, turn: 1 }, 1);
-  assert.equal(s.yaw, TURN_SPEED);
+  const s = stepKart(atSpeed(MAX_SPEED), { forward: 0, turn: 1 }, 0.1);
+  assert.ok(s.yaw > 0, `左转应该让朝向角增大，实际 ${s.yaw}`);
 });
 
 test('右转（turn = -1）：朝向角减小', () => {
-  const s = stepKart(createKartState(), { forward: 0, turn: -1 }, 1);
-  assert.equal(s.yaw, -TURN_SPEED);
+  const s = stepKart(atSpeed(MAX_SPEED), { forward: 0, turn: -1 }, 0.1);
+  assert.ok(s.yaw < 0, `右转应该让朝向角减小，实际 ${s.yaw}`);
 });
 
 
@@ -144,12 +146,27 @@ test('帧率相容（边转边走）：60 帧与 120 帧走出的圆弧几乎重
   const at60 = run(60);
   const at120 = run(120);
 
-  assert.ok(Math.abs(at60.yaw - at120.yaw) < 1e-9,
-    `yaw 不一致：${at60.yaw} vs ${at120.yaw}`);
+  // ★ 这条从「精确相等」放宽成「足够接近」，是模型改动的必然结果：
+  //   转向现在依赖车速（偏航率 ∝ 车速），而车速是分段积分出来的，
+  //   于是 yaw 只是**近似**帧率无关，误差 O(dt)（约 0.014 rad ≈ 0.8°），
+  //   肉眼完全看不出来，而且帧数翻倍误差减半（见下一条）。
+  assert.ok(Math.abs(at60.yaw - at120.yaw) < 0.05,
+    `yaw 相差 ${Math.abs(at60.yaw - at120.yaw)} rad，超出容差`);
 
   // 位置来自分段积分：帧数翻倍误差减半
   const gap = Math.hypot(at60.x - at120.x, at60.z - at120.z);
   assert.ok(gap < 0.2, `60 帧与 120 帧的终点相差 ${gap.toFixed(3)} 米，超出容差`);
+});
+
+test('转向的帧率误差随 dt 收敛：帧数翻倍，误差变小', () => {
+  const runYaw = (frames) => {
+    let s = atSpeed(MAX_SPEED);
+    for (let i = 0; i < frames; i++) s = stepKart(s, { forward: 1, turn: 1 }, 1 / frames);
+    return s.yaw;
+  };
+  const y60 = runYaw(60), y120 = runYaw(120), y240 = runYaw(240);
+  assert.ok(Math.abs(y60 - y120) > Math.abs(y120 - y240),
+    `帧数翻倍后误差应该更小：${Math.abs(y60 - y120)} vs ${Math.abs(y120 - y240)}`);
 });
 
 
@@ -312,34 +329,26 @@ test('跟随系数随速度变大：速度越快，相机跟得越紧', () => {
 
 
 // ---------------------------------------------------------------------------
-//  测试 12：过弯时的镜头偏移方向
-//  这类"左右"最容易搞反，而且搞反了在画面上不一定看得出来（车还是在动）。
+//  测试 12：过弯构图 —— 车不再钉在画面正中
+//
+//  旧的 cameraSideOffset（把相机平移几米）已删除：平移完 lookAt 又把车拉回
+//  正中，等于白做（用户实测原话：「只看到机械的参数在运行，只是表面工作」）。
+//  新做法是「构图解算」：先把构图角换算成屏幕位置，再把车**构造**到那里。
+//  这里钉住换算：同一个角度，在宽 / 窄视野下是同一件事（角度是可推理的量）。
 // ---------------------------------------------------------------------------
-test('过弯镜头往弯道外侧偏：左转往左偏，右转往右偏，直行不偏', () => {
-  const amount = 2;
-
-  const straight = cameraSideOffset(0, 0, amount);
-  // 用 === 而不是 assert.equal：后者背后是 Object.is，
-  // 而 Object.is(-0, 0) 是 false —— JS 的这个怪癖会让"直行不偏移"误报失败。
-  assert.ok(straight.x === 0, `直行不该偏移，实际 ${straight.x}`);
-  assert.ok(straight.z === 0, `直行不该偏移，实际 ${straight.z}`);
-
-  // yaw = 0 时车头朝 -Z，车的右方是 +X
-  const left = cameraSideOffset(1, 0, amount);    // 左转
-  assert.ok(left.x < 0, `左转时相机该往 -X（左侧）偏，实际 ${left.x}`);
-
-  const right = cameraSideOffset(-1, 0, amount);  // 右转
-  assert.ok(right.x > 0, `右转时相机该往 +X（右侧）偏，实际 ${right.x}`);
+test('构图角 → NDC：角度为 0 时在正中', () => {
+  assert.equal(ndcFromAngle(0, 0.83), 0);
 });
 
-test('镜头偏移跟着车头转向：车头转 90° 后，偏移方向也跟着转', () => {
-  const amount = 2;
+test('构图角 → NDC：同一个角度，视野越窄、屏幕位置越偏', () => {
+  const wide = ndcFromAngle(0.2, 0.83);
+  const narrow = ndcFromAngle(0.2, 0.45);
+  assert.ok(narrow > wide, `同样 0.2 rad，窄视野下应该更偏：${narrow} vs ${wide}`);
+});
 
-  // yaw = 90°：车头朝 -X，此时车的右方是 -Z
-  const right = cameraSideOffset(-1, Math.PI / 2, amount);
-
-  assert.ok(Math.abs(right.x) < 1e-9, `x 应该接近 0，实际 ${right.x}`);
-  assert.ok(right.z < 0, `应该往 -Z 偏，实际 ${right.z}`);
+test('构图角 → NDC：tanHalf 不合法时返回 0（不能变成 Infinity / NaN）', () => {
+  assert.equal(ndcFromAngle(0.3, 0), 0);
+  assert.equal(ndcFromAngle(0.3, -1), 0);
 });
 
 
@@ -527,4 +536,80 @@ test('整格吸附：本来就对齐的值纹丝不动', () => {
 test('整格吸附：格宽不合法时原样返回（不能除以 0 变成 NaN）', () => {
   assert.equal(snapToTile(5, 0), 5);
   assert.equal(snapToTile(5, -4), 5);
+});
+
+
+// ===========================================================================
+//  六、转向几何（阿克曼）—— 车不能原地打转
+//
+//  用户实测原话：「我按住 a 键、不按驱动键，小车竟然会原地转向，
+//  不应该只是轮子单独动吗？这个问题很低级，不符合常理。」
+//  根因：旧的 yaw += turn × 常数 × dt 里根本没有车速这一项。
+//  这一节钉住「偏航率 ∝ 车速」。
+// ===========================================================================
+
+test('静止打方向：车不会原地转（只有前轮在摆）', () => {
+  const s = stepKart(createKartState(), { forward: 0, turn: 1 }, 1);
+  assert.equal(s.yaw, 0, '车速为 0 时偏航率必须为 0');
+  assert.equal(s.x, 0);
+  assert.equal(s.z, 0);
+});
+
+test('偏航率 = 车速 / 轴距 × tan(前轮角)', () => {
+  const expected = (4 / WHEELBASE) * Math.tan(0.2);
+  assert.ok(Math.abs(yawRateFor(4, 0.2) - expected) < 1e-9,
+    `预期 ${expected}，实际 ${yawRateFor(4, 0.2)}`);
+});
+
+test('偏航率随车速单调增大：开得越快，转得越快', () => {
+  const slow = yawRateFor(1, MAX_STEER);
+  const mid = yawRateFor(3, MAX_STEER);
+  assert.ok(slow > 0 && mid > slow, `应该随速度增大：${mid} vs ${slow}`);
+});
+
+test('偏航率：倒车时反号（倒着打左方向，车尾往另一边摆）', () => {
+  assert.ok(yawRateFor(-4, MAX_STEER) < 0, '倒车左打方向，偏航率应该为负');
+});
+
+test('偏航率：高速封顶，不会算出轮胎抓不住的弯导致打转', () => {
+  const r = yawRateFor(MAX_SPEED, MAX_STEER);
+  assert.ok(Math.abs(r) <= 24 / Math.max(5, MAX_SPEED) + 1e-9, `超出封顶：${r}`);
+  assert.ok(Math.abs(r) < 4, `不该超过安全转速：${r}`);
+});
+
+test('后轴基准：后轴沿新车头方向前进 |v|·dt（车身绕后轴摆，不是绕几何中心自转）', () => {
+  const dt = 0.1;
+  const start = { x: 0, z: 0, yaw: 0, speed: 6 };
+  const s = stepKart(start, { forward: 1, turn: 1 }, dt);
+  const f = (y) => ({ x: -Math.sin(y), z: -Math.cos(y) });
+
+  const rear0 = { x: start.x - f(start.yaw).x * HALF_BASE, z: start.z - f(start.yaw).z * HALF_BASE };
+  const rear1 = { x: s.x - f(s.yaw).x * HALF_BASE, z: s.z - f(s.yaw).z * HALF_BASE };
+  const disp = { x: rear1.x - rear0.x, z: rear1.z - rear0.z };
+
+  assert.ok(Math.abs(Math.hypot(disp.x, disp.z) - Math.abs(s.speed * dt)) < 1e-9,
+    `后轴位移应该等于 |v|·dt，实际 ${Math.hypot(disp.x, disp.z)}`);
+  const cross = disp.x * f(s.yaw).z - disp.z * f(s.yaw).x;
+  assert.ok(Math.abs(cross) < 1e-9, '后轴应该沿**新**车头方向前进');
+});
+
+
+// ===========================================================================
+//  七、速度感：视野（FOV）随速度张开
+//
+//  用户实测原话：「我看不到有加速度的趋势，手感很差。」
+//  数值上的速度再高，画面上没有变化就等于看不见。参考项目靠张开视野，
+//  而不是拉长臂长（拉长臂长会把主体固定成同一个大小，反而看不出速度）。
+// ===========================================================================
+
+test('视野随速度张开：静止是基准视野，满速张到最大', () => {
+  assert.equal(fovForSpeed(60, 8, 0, 12), 60);
+  assert.equal(fovForSpeed(60, 8, 12, 12), 68);
+  assert.equal(fovForSpeed(60, 8, 24, 12), 68, '超过满速不该继续张开');
+});
+
+test('视野随速度单调增大（这才是"看得见加速度"的来源）', () => {
+  const a = fovForSpeed(60, 8, 3, 12);
+  const b = fovForSpeed(60, 8, 9, 12);
+  assert.ok(b > a, `速度高的视野应该更大：${b} vs ${a}`);
 });

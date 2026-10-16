@@ -30,8 +30,33 @@ export const COAST = 3;
 /** 转弯时的速度损耗系数：转得越急、开得越快，掉得越多 */
 export const TURN_DRAG = 0.55;
 
-/** 转向速度（弧度/秒），2.5 ≈ 143°/秒，街机赛车那种利落手感 */
-export const TURN_SPEED = 2.5;
+// ---------------------------------------------------------------------------
+//  转向几何（阿克曼）—— 车不能原地打转
+//
+//  真车四个轮子里只有前轮转向、后轮固定，「转弯」是前轮转角 + 车速共同决定的：
+//        yawRate = 车速 / 轴距 × tan(前轮转角)
+//  ★ 关键：偏航率**正比于车速**。车速 0 → 偏航率 0 —— 停着打死方向盘，
+//    车只摆前轮、原地不动。（用户实测报过「只按 A，车竟然自己原地转」，
+//    根因就是旧的 yaw += turn × 常数 × dt 里根本没有车速这一项。）
+//
+//  参考实现用的是同一条式子（kart-royale/src/kart/Kart.ts）：
+//        rackYaw = clamp((fwd / WHEELBASE) * tan(steerAngle), ±maxYaw)
+//  并加了封顶 maxYaw = 24 / max(5, |fwd|)：高速打死方向时若照实算，
+//  会要求一个轮胎根本抓不住的弯 → 打转。
+// ---------------------------------------------------------------------------
+
+/** 轴距（米）：前轮 z=-0.55 到后轮 z=+0.58，与小车的模型一致 */
+export const WHEELBASE = 1.13;
+
+/** 几何中心到后轴的距离（米）—— 后轮在 z=+0.58，那里就是后轴 */
+export const HALF_BASE = 0.58;
+
+/** 前轮最大转角（弧度）。0.55 rad ≈ 31.5°，静止满舵角（照参考实现） */
+export const MAX_STEER = 0.55;
+
+/** 偏航率封顶：maxYaw = TURN_RATE_CAP / max(TURN_RATE_CAP_SPEED, |车速|) */
+export const TURN_RATE_CAP = 24;
+export const TURN_RATE_CAP_SPEED = 5;
 
 
 /**
@@ -99,8 +124,11 @@ export function nextSpeed(current, input, dt, maxSpeed = MAX_SPEED) {
  * @returns {{x:number, z:number, yaw:number, speed:number}} 全新的状态对象
  */
 export function stepKart(state, input, dt, maxSpeed = MAX_SPEED) {
-  // 先转方向。这一步必须排在前头，否则车会走出"先直行、再拐弯"的折线
-  const yaw = state.yaw + input.turn * TURN_SPEED * dt;
+  // ---- 转向：由「车速 × 前轮转角」决定，不是直接拧朝向 ----
+  // 车速为 0 时 yawRate 就是 0，所以停着打方向车不会原地转（只有前轮摆）。
+  const steerAngle = input.turn * MAX_STEER;
+  const yawRate = yawRateFor(state.speed, steerAngle);
+  const yaw = state.yaw + yawRate * dt;
 
   // 速度是累积出来的，不是按一下油门就到顶
   const speed = nextSpeed(state.speed, input, dt, maxSpeed);
@@ -109,10 +137,20 @@ export function stepKart(state, input, dt, maxSpeed = MAX_SPEED) {
   // 乘 dt 是整段代码里最关键的一处：不乘的话，60 帧的电脑会比 30 帧的快一倍。
   const distance = speed * dt;
 
-  // yaw = 0 朝 -Z 方向，用 -sin / -cos 把角度换算成实际的移动方向
+  // ---- 基准点是后轴，不是几何中心 ----
+  // 后轮驱动、后轮不转向，所以「沿着车头前进」的其实是**后轴**，车身绕后轴摆：
+  //     rear  = center − 前向 × 半轴距
+  //     rear' = rear + 前向' × distance
+  //     center' = rear' + 前向' × 半轴距
+  // 展开：center' = center + 前向'×(distance + 半轴距) − 前向 × 半轴距。
+  // 这一帧没转向（前向' = 前向）时，它自动退化成普通的「沿车头前进」。
+  const fx0 = -Math.sin(state.yaw), fz0 = -Math.cos(state.yaw); // 前向（旧朝向）
+  const fx1 = -Math.sin(yaw),       fz1 = -Math.cos(yaw);       // 前向（新朝向）
+  const reach = distance + HALF_BASE;
+
   return {
-    x: state.x - Math.sin(yaw) * distance,
-    z: state.z - Math.cos(yaw) * distance,
+    x: state.x + fx1 * reach - fx0 * HALF_BASE,
+    z: state.z + fz1 * reach - fz0 * HALF_BASE,
     yaw,
     speed,
   };
@@ -231,31 +269,11 @@ export function followRateFor(speed, base, gain) {
 }
 
 
-/**
- * 算出相机应该往车的哪一侧偏多少 —— 过弯时用。
- *
- * 为什么需要它：
- * 把车永远钉在画面正中时，右转弯时右边（弯心那一侧）的视野被车挡住了。
- * 真实赛车游戏会让镜头往**弯道外侧**偏一点，于是车在画面上偏向弯心一侧，
- * 把弯心的视野让出来 —— 这也让玩家能感觉到"赛道是有宽度的"。
- *
- * @param {number} turn +1 左转，-1 右转，0 直行
- * @param {number} yaw 车头朝向（弧度）
- * @param {number} amount 最大偏移距离（米）
- * @returns {{x:number, z:number}} 相机位置相对车后方的额外偏移
- */
-export function cameraSideOffset(turn, yaw, amount) {
-  // 车的"右方"单位向量。
-  // yaw = 0 时车头朝 -Z，它的右方是 +X；绕 Y 轴转 yaw 之后就是：
-  const rightX = Math.cos(yaw);
-  const rightZ = -Math.sin(yaw);
-
-  // 左转（turn = +1）时相机要往**左**偏，也就是右方取负。
-  // 于是车在画面上偏向右侧 —— 弯心（左边）的视野让出来了。
-  const signed = -turn * amount;
-
-  return { x: rightX * signed, z: rightZ * signed };
-}
+// ---------------------------------------------------------------------------
+//  注：旧的 cameraSideOffset()（过弯把相机往弯外平移几米）已删除。
+//  它是「表面工作」：相机平移完，下一行 camera.lookAt(车) 又把车拉回画面正中，
+//  等于白做。过弯构图改由 main.js 的「构图解算」承担 —— 直接把车摆到
+//  画面指定位置（见 Camera.ts 的 frameSubject）。
 
 
 // ---------------------------------------------------------------------------
@@ -342,4 +360,65 @@ export function screenFraction(worldSize, distance, fovDeg) {
 export function snapToTile(value, tile) {
   if (!(tile > 0)) return value;
   return Math.round(value / tile) * tile;
+}
+
+
+/**
+ * 阿克曼转向：给定车速和前轮转角，算这一帧该有的偏航率（弧度/秒）。
+ *
+ *      yawRate = 车速 / 轴距 × tan(前轮转角)        ← 再对封顶做钳制
+ *
+ * ★ 车速为 0 时结果是 0 —— 这是「车不能原地打转」的全部依据。
+ *   倒车（车速为负）时结果反号 —— 倒着打左方向，车尾往另一边摆，符合直觉。
+ *
+ * 封顶 maxYaw = TURN_RATE_CAP / max(TURN_RATE_CAP_SPEED, |车速|)：
+ * 没有它，高速打死方向会算出一个轮胎抓不住的弯，车会瞬间打转（参考实现的原话）。
+ *
+ * @param {number} speed 车速（米/秒，倒车为负）—— 用**这一帧开始时**的车速
+ * @param {number} steerAngle 前轮转角（弧度）
+ * @param {number} wheelbase 轴距（米）
+ * @returns {number} 偏航率（弧度/秒，已钳制）
+ */
+export function yawRateFor(speed, steerAngle, wheelbase = WHEELBASE) {
+  const rack = (speed / wheelbase) * Math.tan(steerAngle);
+  const maxYaw = TURN_RATE_CAP / Math.max(TURN_RATE_CAP_SPEED, Math.abs(speed));
+  return Math.max(-maxYaw, Math.min(maxYaw, rack));
+}
+
+
+/**
+ * 「视野（FOV）随速度张开」—— 速度感最主要的来源。
+ *
+ * 用户实测原话：「我看不到有加速度的趋势」。车在加速时，画面必须有变化，
+ * 否则再快的数值也「看不见」。参考项目选择张开**视野**而不是拉长臂长，
+ * 原注释说得很清楚：让臂长去跟着匹配，会把主体在每一帧里固定成同一个大小，
+ * 反而看不出速度；视野张开则让四周的东西「向你扑过来」，这才是速度感。
+ *
+ * @param {number} baseFov 静止时的垂直视野（度）
+ * @param {number} gainDeg 满速时额外张开多少度
+ * @param {number} speed 当前车速（米/秒，取绝对值）
+ * @param {number} maxSpeed 满速（米/秒）
+ * @returns {number} 当前该用的垂直视野（度）
+ */
+export function fovForSpeed(baseFov, gainDeg, speed, maxSpeed = MAX_SPEED) {
+  if (!(maxSpeed > 0)) return baseFov;
+  const t = Math.min(1, Math.abs(speed) / maxSpeed);
+  return baseFov + gainDeg * t;
+}
+
+
+/**
+ * 把「构图角」换算成屏幕上的 NDC 横向位置（-1..1，0 = 正中）。
+ *
+ * 为什么用**角度**而不是直接给一个像素/NDC：参考实现的理由 ——
+ * 「同样的三度领入，在 62° 和 100° 的视野里是同一件事」。
+ * 用角度表达，换视野、换宽高比，构图感觉都不变。
+ *
+ * @param {number} angleRad 构图角（弧度）
+ * @param {number} tanHalf 横向半视野的正切 = tan(垂直视野/2) × 宽高比
+ * @returns {number} NDC 横向位置
+ */
+export function ndcFromAngle(angleRad, tanHalf) {
+  if (!(tanHalf > 0)) return 0;
+  return Math.tan(angleRad) / tanHalf;
 }
