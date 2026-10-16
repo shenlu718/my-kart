@@ -99,6 +99,16 @@ const pad = createPadState();
 let seq = 0;             // 包序号：让游戏侧丢弃乱序/迟到的旧包
 let rttMs = null;
 
+// ★ 为什么要有"提示"这一路：send() 每 60ms 跑一次并重写状态行。
+//   如果失败原因（不是 https / 浏览器不支持 / 权限被拒）也写在同一行，
+//   它会在 60ms 内被心跳擦掉 —— 表现就是「点了没反应」。
+//   所以提示单独记时刻，心跳在 3 秒内不许覆盖它。
+let noticeAt = 0;
+function setNotice(text) {
+  noticeAt = performance.now();
+  stateEl.textContent = text;
+}
+
 // ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
 const sending = !new URLSearchParams(location.search).has('nostream');
 
@@ -178,22 +188,22 @@ function onOrientation(e) {
 
 async function enableTilt() {
   if (!window.isSecureContext) {
-    stateEl.textContent = '体感需要 https 打开（现在不是安全上下文）';
+    setNotice('体感需要 https 打开（当前不是安全上下文）');
     return;
   }
   if (typeof DeviceOrientationEvent === 'undefined') {
-    stateEl.textContent = '这个浏览器不支持体感';
+    setNotice('这个浏览器不支持体感');
     return;
   }
   try {
     // iOS 需要显式授权（安卓一般不需要）；这个调用还必须在真实点击里发生
     if (typeof DeviceOrientationEvent.requestPermission === 'function') {
       if (await DeviceOrientationEvent.requestPermission() !== 'granted') {
-        stateEl.textContent = '体感权限被拒绝';
+        setNotice('体感权限被拒绝');
         return;
       }
     }
-    // 陀螺仪是**另一个 API**，iOS 要**单独再申请一次**（这点资料里写得很清楚，很容易漏）
+    // 陀螺仪是**另一个 API**，iOS 要**单独再申请一次**（资料里写明，很容易漏）
     if (typeof DeviceMotionEvent !== 'undefined'
         && typeof DeviceMotionEvent.requestPermission === 'function') {
       try { await DeviceMotionEvent.requestPermission(); } catch { /* 不给就算了，只用倾角 */ }
@@ -207,9 +217,9 @@ async function enableTilt() {
     zero = null; candidate = null;
     tiltBtn.textContent = '体感：开';
     tiltBtn.classList.add('on');
-    stateEl.textContent = '体感已开 · 拿稳手机校准中…';
+    setNotice('体感已开 · 拿稳手机校准中…');
   } catch (e) {
-    stateEl.textContent = '体感开启失败（' + (e.message || e) + '）';
+    setNotice('体感开启失败（' + (e.message || e) + '）');
   }
 }
 
@@ -228,11 +238,11 @@ tiltBtn.addEventListener('click', () => {
 calBtn.addEventListener('click', () => {
   if (!tiltOn) { enableTilt(); return; }
   if (raw === null || performance.now() - sensorAt > SENSOR_STALE_MS) {
-    stateEl.textContent = '请先拿稳手机';
+    setNotice('请先拿稳手机');
     return;
   }
   zero = raw; candidate = null;
-  stateEl.textContent = '已重新校准';
+  setNotice('已重新校准');
 });
 
 document.getElementById('inv-btn').addEventListener('click', (ev) => {
@@ -271,7 +281,10 @@ async function send() {
     const ms = performance.now() - t0;
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    if (!tiltOn) stateEl.textContent = `已连接 · v5 · 往返 ${Math.round(rttMs)} ms`;
+    // 3 秒内不覆盖提示（否则失败原因一写就被心跳擦掉，见上面 setNotice 的注释）
+    if (!tiltOn && performance.now() - noticeAt > 3000) {
+      stateEl.textContent = `已连接 · v6 · 往返 ${Math.round(rttMs)} ms`;
+    }
   } catch (e) {
     dot.classList.remove('on');
     rttMs = null;   // 失败就清掉，留着旧值会让人以为"还通着，只是慢"
