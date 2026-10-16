@@ -74,13 +74,14 @@ function broadcastInput() {
 }
 
 /**
- * 列出本机所有局域网 IPv4 地址，**优先真正的 WiFi 网卡**。
+ * 列出本机所有局域网 IPv4 地址，并**按用途标注**。
  *
- * 为什么要挑（实测踩到两次）：
- *   ① 这台机器装了 Tailscale（100.64/10 段）→ 直接取第一个会拿到手机连不上的地址；
- *   ② Windows 的「移动热点 / Internet 连接共享」是 192.168.137.1 的虚拟网卡，
- *      按"192.168 优先"会把真正的 WiFi（本例是 10.2.11.122 / 网卡 WLAN）压到备选。
- * 所以：虚拟网卡排最后，无线网卡排最前，其余私网地址居中。全部打印出来备查。
+ * 为什么要挑（实测踩到三次）：
+ *   ① Tailscale 的 100.64/10 段 —— 手机不装 Tailscale 就连不上；
+ *   ② Windows「移动热点 / Internet 连接共享」是 192.168.137.1 的虚拟网卡 ——
+ *      但它**恰恰是校园网下最靠谱的入口**（手机连电脑热点时用这个）；
+ *   ③ 校园网普遍做设备隔离，普通 WiFi 地址（本例 10.2.11.122）手机往往够不到。
+ * 所以不"挑一个"，而是**全列出来、各自标清楚什么时候用哪个**。
  */
 function lanAddresses() {
   const VIRTUAL = /tailscale|vethernet|vmware|virtualbox|hyper-?v|loopback|bluetooth|zerotier|docker|wsl/i;
@@ -89,15 +90,24 @@ function lanAddresses() {
   for (const [name, list] of Object.entries(networkInterfaces())) {
     for (const ni of list || []) {
       if (ni.family !== 'IPv4' || ni.internal) continue;
+      const isHotspot = ni.address.startsWith('192.168.137.');
+      const isTailscale = ni.address.startsWith('100.') && Number(ni.address.split('.')[1]) >= 64;
       const [a, b] = ni.address.split('.').map(Number);
       const isPrivate =
         (a === 192 && b === 168) || a === 10 || (a === 172 && b >= 16 && b <= 31);
-      const isIcsHotspot = ni.address.startsWith('192.168.137.');
       let score = 2;
-      if (isPrivate && !isIcsHotspot) score = 1;
-      if (WIRELESS.test(name) && !VIRTUAL.test(name)) score = 0;
-      if (VIRTUAL.test(name) || isIcsHotspot) score = 3;
-      found.push({ address: ni.address, name, score });
+      if (isPrivate && !isHotspot) score = 1;                 // 普通私网地址
+      if (WIRELESS.test(name) && !VIRTUAL.test(name)) score = 0; // 真无线网卡优先展示
+      if (isHotspot) score = 2;                               // 热点地址要单独说明用法
+      if (VIRTUAL.test(name) || isTailscale) score = 4;       // 虚拟网卡排最后
+      found.push({
+        address: ni.address,
+        name,
+        score,
+        hint: isHotspot ? '手机连「本机热点」时用这个'
+          : isTailscale ? '手机也装了 Tailscale 时用这个'
+          : '手机和电脑在同一个 WiFi 时用这个',
+      });
     }
   }
   return found.sort((x, y) => x.score - y.score);
@@ -196,11 +206,14 @@ server.listen(PORT, '0.0.0.0', () => {
   const lan = lanAddresses();
   if (lan.length) {
     console.log('');
-    console.log(`  📱 手机手柄：用手机浏览器打开  http://${lan[0].address}:${PORT}/phone/`);
-    console.log('     （手机要和这台电脑连同一个 WiFi）');
-    for (const extra of lan.slice(1)) {
-      console.log(`     备选地址： http://${extra.address}:${PORT}/phone/   [网卡 ${extra.name}]`);
+    console.log('  📱 手机手柄（手机不用装任何东西，浏览器直接开）：');
+    for (const entry of lan) {
+      const mark = entry === lan[0] ? '→' : ' ';
+      console.log(`   ${mark} http://${entry.address}:${PORT}/phone/`);
+      console.log(`       ${entry.hint}   [网卡 ${entry.name}]`);
     }
+    console.log('     ★ 校园网 / 公司网常有「设备互相隔离」，手机够不到电脑。');
+    console.log('       那种情况下开电脑的「移动热点」，让手机连它，用上面带「本机热点」的地址。');
   }
   console.log('    浏览器应该已经自动打开了');
   console.log('');
