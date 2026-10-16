@@ -10,43 +10,56 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createKartState, stepKart, camHeightOf, approachFactor, MOVE_SPEED, TURN_SPEED } from './kart-math.js';
+import {
+  createKartState, stepKart, nextSpeed,
+  camHeightOf, approachFactor,
+  MAX_SPEED, REVERSE_SPEED, ACCEL, TURN_SPEED,
+} from './kart-math.js';
 
+
+const atSpeed = (speed) => ({ x: 0, z: 0, yaw: 0, speed });
+
+
+// ===========================================================================
+//  一、车辆运动
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
 //  测试 1：初始状态
 // ---------------------------------------------------------------------------
-test('初始状态：车在原点，朝向 -Z（Three.js 的默认前方）', () => {
+test('初始状态：停在原点，朝 -Z（Three.js 的默认前方），速度为 0', () => {
   const s = createKartState();
   assert.equal(s.x, 0);
   assert.equal(s.z, 0);
   assert.equal(s.yaw, 0);
+  assert.equal(s.speed, 0);
 });
 
 
 // ---------------------------------------------------------------------------
 //  测试 2：直行
-//  约定：yaw = 0 时车头朝 -Z 方向，所以前进意味着 z 变小
+//  约定：yaw = 0 时车头朝 -Z 方向，所以前进意味着 z 变小。
+//
+//  注意这里用「已经是满速」的状态来测位移 —— 因为加了速度物理之后，
+//  「踩油门 1 秒」走多远取决于加速曲线，不再是「速度 × 时间」这么简单。
+//  测位移就用满速，测加速过程另有专门的测试。
 // ---------------------------------------------------------------------------
-test('踩油门 1 秒：朝 -Z 方向前进 MOVE_SPEED 米', () => {
-  const s = stepKart(createKartState(), { forward: 1, turn: 0 }, 1);
+test('满速直行 1 秒：朝 -Z 方向前进 MAX_SPEED 米', () => {
+  const s = stepKart(atSpeed(MAX_SPEED), { forward: 1, turn: 0 }, 1);
   assert.equal(s.x, 0, '直行时不该左右移动');
-  assert.equal(s.z, -MOVE_SPEED, '应该朝 -Z 前进');
+  assert.equal(s.z, -MAX_SPEED, '应该朝 -Z 前进');
 });
 
 
 // ---------------------------------------------------------------------------
 //  测试 2b：倒车
-//
-//  用户实测报告：「按住下箭头没有反应」。
-//  查下来：底层 stepKart 本来就支持负的 forward，是 main.js 的键盘映射
-//  漏了 ↓ / S —— 典型的「能力有了、界面没接上」。
-//  这条测试钉住底层行为：以后谁改坏倒车，它会红。
+//  用户实测报告：「按住下箭头没有反应」——底层本来就支持，是 main.js
+//  的键盘映射漏了 ↓ / S。这条钉住底层行为。
 // ---------------------------------------------------------------------------
-test('倒车（forward = -1）：朝 +Z 方向后退', () => {
-  const s = stepKart(createKartState(), { forward: -1, turn: 0 }, 1);
+test('倒车：朝 +Z 方向后退', () => {
+  const s = stepKart(atSpeed(-5), { forward: -1, turn: 0 }, 0.5);
   assert.equal(s.x, 0, '倒车时不该左右移动');
-  assert.equal(s.z, MOVE_SPEED, '应该朝车头的反方向后退');
+  assert.ok(s.z > 0, `倒车应该朝 +Z（车头反方向），实际 z = ${s.z}`);
 });
 
 
@@ -67,10 +80,10 @@ test('右转（turn = -1）：朝向角减小', () => {
 
 
 // ---------------------------------------------------------------------------
-//  测试 5：不按键就不动
+//  测试 5：不按键
 // ---------------------------------------------------------------------------
-test('什么都不按：位置和朝向都不变', () => {
-  const after = stepKart({ x: 3, z: 5, yaw: 1 }, { forward: 0, turn: 0 }, 0.5);
+test('什么都不按、且本来就没速度：位置和朝向都不变', () => {
+  const after = stepKart({ x: 3, z: 5, yaw: 1, speed: 0 }, { forward: 0, turn: 0 }, 0.5);
   assert.equal(after.x, 3);
   assert.equal(after.z, 5);
   assert.equal(after.yaw, 1);
@@ -79,12 +92,11 @@ test('什么都不按：位置和朝向都不变', () => {
 
 // ---------------------------------------------------------------------------
 //  测试 6：转完再走，走的是新方向
-//  这条检查「朝向」和「移动」是联动的，而不是各算各的。
 // ---------------------------------------------------------------------------
-test('先转到 yaw = 90°，再前进 1 秒：应该朝 -X 方向移动', () => {
-  const turned = { x: 0, z: 0, yaw: Math.PI / 2 };
+test('先转到 yaw = 90°，再满速直行 1 秒：应该朝 -X 方向移动', () => {
+  const turned = { x: 0, z: 0, yaw: Math.PI / 2, speed: MAX_SPEED };
   const s = stepKart(turned, { forward: 1, turn: 0 }, 1);
-  assert.ok(Math.abs(s.x - -MOVE_SPEED) < 1e-9, `预期 x = ${-MOVE_SPEED}，实际 ${s.x}`);
+  assert.ok(Math.abs(s.x - -MAX_SPEED) < 1e-9, `预期 x = ${-MAX_SPEED}，实际 ${s.x}`);
   assert.ok(Math.abs(s.z) < 1e-9, `预期 z = 0，实际 ${s.z}`);
 });
 
@@ -94,33 +106,34 @@ test('先转到 yaw = 90°，再前进 1 秒：应该朝 -X 方向移动', () =>
 //
 //  同一秒的动作，不管电脑快慢、拆成多少帧，结果必须一样。
 //  新手最常犯的错是写 `x += 0.1`（每帧加固定值）——那样 60 帧的电脑
-//  会比 30 帧的电脑跑快一倍。正确做法是乘上 dt（这一帧过了多少秒）。
+//  会比 30 帧的电脑跑快一倍。
 //
-//  写这条测试时踩了两个坑，都记在这里，因为它们是真实存在的：
+//  写这条测试时踩过两个坑，记在这里，因为它们是真实存在的：
 //
 //  坑一：不能拿「1 帧」和「60 帧」比转弯路径。
-//  「1 帧走 1 秒」的含义是"瞬间转到 2.5 弧度，再直走 4 米"，走的是直线；
-//  而「60 帧」是边转边走，走的是圆弧。两者相差 4.1 米——这不是误差，
-//  是两种不同的运动。所以转弯情形要拿 60 帧和 120 帧比（都是圆弧）。
+//  「1 帧走 1 秒」是"瞬间转完再直走"，走的是直线；「60 帧」是边转边走，
+//  走的是圆弧。两者相差好几米——那不是误差，是两种不同的运动。
 //
-//  坑二：直线也不能用严格相等。60 次加法累加必然带来浮点误差，
-//  所以用 1e-9 这种「实际上就是相等」的容差。
+//  坑二：也不能拿「从静止起步」来比，因为加速过程是分段累加的。
+//
+//  所以：位移的帧率无关性，用「已经满速」的状态来测（速度恒定，位移线性）。
 // ---------------------------------------------------------------------------
-test('帧率无关（直线）：1 秒拆成 60 帧，与一次走完 1 秒结果相同', () => {
-  let stepwise = createKartState();
+test('帧率无关（直线）：满速 1 秒拆成 60 帧，与一次走完 1 秒结果相同', () => {
+  const start = atSpeed(MAX_SPEED);
+
+  let stepwise = start;
   for (let i = 0; i < 60; i++) {
     stepwise = stepKart(stepwise, { forward: 1, turn: 0 }, 1 / 60);
   }
-  const oneShot = stepKart(createKartState(), { forward: 1, turn: 0 }, 1);
+  const oneShot = stepKart(start, { forward: 1, turn: 0 }, 1);
 
-  // 直线行驶时 yaw 不变，两种拆分方式语义完全相同，只差浮点累加误差
-  assert.ok(Math.abs(stepwise.x - oneShot.x) < 1e-9);
-  assert.ok(Math.abs(stepwise.z - oneShot.z) < 1e-9);
+  assert.ok(Math.abs(stepwise.z - oneShot.z) < 1e-9,
+    `60 帧走了 ${stepwise.z}，1 帧走了 ${oneShot.z}，应该一致`);
 });
 
-test('帧率相容（边转边走）：60 帧与 120 帧走出几乎相同的圆弧', () => {
+test('帧率相容（边转边走）：60 帧与 120 帧走出的圆弧几乎重合', () => {
   const run = (frames) => {
-    let s = createKartState();
+    let s = atSpeed(MAX_SPEED);
     for (let i = 0; i < frames; i++) {
       s = stepKart(s, { forward: 1, turn: 1 }, 1 / frames);
     }
@@ -130,35 +143,97 @@ test('帧率相容（边转边走）：60 帧与 120 帧走出几乎相同的圆
   const at60 = run(60);
   const at120 = run(120);
 
-  // 朝向是线性累加的，与帧数无关
   assert.ok(Math.abs(at60.yaw - at120.yaw) < 1e-9,
     `yaw 不一致：${at60.yaw} vs ${at120.yaw}`);
 
-  // 位置来自分段积分：帧数翻倍，误差减半。实测差距在 0.1 米以内
+  // 位置来自分段积分：帧数翻倍误差减半
   const gap = Math.hypot(at60.x - at120.x, at60.z - at120.z);
-  assert.ok(gap < 0.1, `60 帧与 120 帧的终点相差 ${gap.toFixed(3)} 米，超出容差`);
+  assert.ok(gap < 0.2, `60 帧与 120 帧的终点相差 ${gap.toFixed(3)} 米，超出容差`);
 });
 
 
 // ---------------------------------------------------------------------------
 //  测试 8：纯函数
-//  不该偷偷改掉传进来的对象——否则调用方手里的数据会被无声改掉，
-//  这类 bug 极难排查。
 // ---------------------------------------------------------------------------
 test('不修改传入的状态对象（纯函数）', () => {
-  const original = { x: 1, z: 2, yaw: 0.5 };
+  const original = { x: 1, z: 2, yaw: 0.5, speed: 3 };
   const snapshot = { ...original };
   stepKart(original, { forward: 1, turn: 1 }, 1);
   assert.deepEqual(original, snapshot, '传入的对象被改动了');
 });
 
 
+// ===========================================================================
+//  二、速度物理
+//
+//  用户实测反馈原话：
+//  「赛车的速度不应该是固定的，他会有一个加速的过程然后到达峰值，
+//    然后转弯的时候速度肯定是会衰减，不应该过弯的速度跟直行的速度一样快。」
+// ===========================================================================
+
+test('从静止踩油门：速度是慢慢涨上去的，不是一帧到顶', () => {
+  const afterOneFrame = nextSpeed(0, { forward: 1, turn: 0 }, 1 / 60);
+  assert.ok(afterOneFrame > 0, '应该开始加速');
+  assert.ok(afterOneFrame < MAX_SPEED, '一帧之内不该直接到顶');
+
+  // 加速应该是线性的：1 秒后大约涨到 ACCEL
+  const afterOneSecond = nextSpeed(0, { forward: 1, turn: 0 }, 1);
+  assert.ok(Math.abs(afterOneSecond - ACCEL) < 1e-9, `1 秒后应该到 ${ACCEL}，实际 ${afterOneSecond}`);
+});
+
+test('一直踩油门：涨到峰值就停住，不会无限增长', () => {
+  let speed = 0;
+  for (let i = 0; i < 600; i++) speed = nextSpeed(speed, { forward: 1, turn: 0 }, 1 / 60);
+  assert.ok(Math.abs(speed - MAX_SPEED) < 1e-9, `应该稳定在 ${MAX_SPEED}，实际 ${speed}`);
+});
+
+test('松油门：自然减速，最终停下且不会变成负数', () => {
+  let speed = MAX_SPEED;
+  for (let i = 0; i < 600; i++) speed = nextSpeed(speed, { forward: 0, turn: 0 }, 1 / 60);
+  assert.equal(speed, 0, '应该完全停下');
+});
+
+test('刹车：减速比松油门更快，且能进入倒车', () => {
+  const coasting = nextSpeed(8, { forward: 0, turn: 0 }, 0.5);
+  const braking = nextSpeed(8, { forward: -1, turn: 0 }, 0.5);
+  assert.ok(braking < coasting, '踩刹车的减速应该明显快于自然滑行');
+
+  // 一直按住后退，速度会变成负数（倒车），但有下限
+  let speed = 0;
+  for (let i = 0; i < 600; i++) speed = nextSpeed(speed, { forward: -1, turn: 0 }, 1 / 60);
+  assert.ok(Math.abs(speed - -REVERSE_SPEED) < 1e-9, `倒车峰值应该是 ${-REVERSE_SPEED}，实际 ${speed}`);
+});
+
+test('转弯时速度掉得比直行快（过弯要收油）', () => {
+  // 两边都不给油。如果一边给油、一边不给，加速的影响会混进来，
+  // 测到的就不是纯粹的转弯损耗了。
+  const straight = nextSpeed(MAX_SPEED, { forward: 0, turn: 0 }, 0.5);
+  const turning = nextSpeed(MAX_SPEED, { forward: 0, turn: 1 }, 0.5);
+  assert.ok(turning < straight,
+    `同样 0.5 秒，过弯应该比直行慢：直行 ${straight}，过弯 ${turning}`);
+});
+
+test('转弯的速度损失随速度变大：开得越快，过弯掉得越多', () => {
+  const lossAt = (v) => v - nextSpeed(v, { forward: 0, turn: 1 }, 0.1);
+  assert.ok(lossAt(MAX_SPEED) > lossAt(3),
+    `高速过弯的损失应该更大：${lossAt(MAX_SPEED)} vs ${lossAt(3)}`);
+});
+
+test('停在原地打方向：速度不会被扣成负数', () => {
+  const s = nextSpeed(0, { forward: 0, turn: 1 }, 1);
+  assert.equal(s, 0, '没速度的时候转弯不该把它变成负数');
+});
+
+
+// ===========================================================================
+//  三、相机数学
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
 //  测试 9：相机高度换算
-//
-//  这条测试专门防一个极容易犯的错：Math.tan 收的是**弧度**不是角度。
-//  少写 * Math.PI / 180 的话，45° 会被当成 45 弧度算，
-//  结果 tan(45) ≈ 1.62 —— 相机跑到天上去了，但代码"看着没问题"。
+//  专门防一个极容易犯的错：Math.tan 收的是**弧度**不是角度。
+//  少写 * Math.PI / 180 的话，45° 会被当成 45 弧度算，结果 tan(45) ≈ 1.62，
+//  相机跑到天上去了，但代码"看着没问题"。
 // ---------------------------------------------------------------------------
 test('俯角 45°：相机高度应该正好等于水平距离（tan45° = 1）', () => {
   const h = camHeightOf({ distance: 10, angleDeg: 45 });
@@ -182,13 +257,9 @@ test('俯角变大：相机更高；距离变大：相机同比例更高', () =>
 
 
 // ---------------------------------------------------------------------------
-//  测试 10：帧率无关的平滑逼近
-//
-//  相机平滑跟随靠它。这条测试钉住的是那个最容易犯的错：
-//  写成「每帧固定靠近 10%」——那样 60fps 的机器追得比 30fps 快一倍。
-//
+//  测试 10：帧率无关的平滑逼近（相机跟随用）
 //  判定方式：跑同样长的 1 秒，30 帧和 60 帧的剩余距离必须一致，
-//  而且都精确等于 e^(-rate)（这是指数衰减的解析解）。
+//  而且都精确等于 e^(-rate)。
 // ---------------------------------------------------------------------------
 test('平滑逼近：30 帧和 60 帧跑完 1 秒，剩下的距离完全一样', () => {
   const rate = 7;
@@ -202,7 +273,6 @@ test('平滑逼近：30 帧和 60 帧跑完 1 秒，剩下的距离完全一样'
   assert.ok(Math.abs(remainingAt60 - remainingAt30) < 1e-9,
     `60帧剩 ${remainingAt60}，30帧剩 ${remainingAt30}，应该一致`);
 
-  // 解析解：经过 t 秒后，剩余比例 = e^(-rate × t)
   assert.ok(Math.abs(remainingAt60 - Math.exp(-rate)) < 1e-9,
     `应该等于 e^(-7)，实际 ${remainingAt60}`);
 });

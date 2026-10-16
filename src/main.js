@@ -1,5 +1,5 @@
 // ============================================================================
-//  main.js —— 一个能被键盘开动的方块
+//  main.js —— 一辆能被键盘开动的小车
 //
 //  分工：
 //    kart-math.js  算「车该怎么动」（纯函数，有测试）
@@ -8,7 +8,7 @@
 // ============================================================================
 
 import * as THREE from '../vendor/three/three.module.js';
-import { createKartState, stepKart, camHeightOf, approachFactor } from './kart-math.js';
+import { createKartState, stepKart, camHeightOf, approachFactor, MAX_SPEED } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
 
@@ -19,13 +19,11 @@ import { createKeyState } from './keys.js';
 //    距离 —— 相机在车后多远（直接决定车看起来多大）
 //    俯角 —— 从上往下看多少度（决定看得到多远 vs 看到多少脚下）
 //
-//  上一版把「距离」和「高度」当成两个独立参数，结果调距离时俯角跟着变，
-//  两个变量互相污染，调不出想要的手感。
-//
-//  ★ 这两个数可以边开边调，不用改代码、不用刷新：
+//  ★ 可以边开边调，不用改代码、不用刷新：
 //       [   ]    ← 拉近 / 拉远   （车变大 / 变小）
 //       -   =    ← 俯角变平 / 变陡（看得更远 / 看得更下）
-//    右上角实时显示当前值。调到满意后把数字告诉我，我固化成默认。
+//       ,   .    ← 峰值速度调慢 / 调快
+//    右上角实时显示当前值和实际车速。
 // ---------------------------------------------------------------------------
 const cam = {
   distance: 7.0,  // 相机在车后多远（用户实测调出来的值）
@@ -39,17 +37,21 @@ const cam = {
 const CAM_FOLLOW_RATE = 7;
 
 /**
- * 速度倍率：乘在 kart-math 的 MOVE_SPEED（4 米/秒）之上。
+ * 速度倍率：乘在 kart-math 的 MAX_SPEED 上。
  *
- * 为什么用倍率，而不是直接改 MOVE_SPEED？
- * 因为 MOVE_SPEED 是底层的基准常量、测试也引用着它，改它会破坏测试的意义。
+ * 为什么用倍率，而不是直接改 MAX_SPEED？
+ * 因为那是底层的基准常量、测试也引用着它，改它会破坏测试的意义
+ * （测试断言"满速 1 秒走 MAX_SPEED 米"，改了常量它就变成在验证新数字）。
  * 倍率留在 main.js 这层（纯表现层），随便调、不影响任何测试。
  * 「底层定基准、上层调口味」是很常见的分层方式。
  */
 let speedScale = 1.5;
 
-// （俯角 → 高度的换算 camHeightOf 已搬到 kart-math.js，
-//   那样才能被自动化测试覆盖——它有个极易搞错的弧度/角度陷阱。）
+/** 前轮的最大摆角（视觉用）。30° 已经很明显了 */
+const MAX_STEER_VISUAL = Math.PI / 6;
+
+/** 轮子半径，用来算滚动的圈数 */
+const WHEEL_RADIUS = 0.25;
 
 
 // ---------- 1. 场景 ----------
@@ -78,12 +80,85 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
 
-// ---------- 4. 车（暂时还是方块，但做成扁长的，能看出车头） ----------
-const kart = new THREE.Mesh(
-  new THREE.BoxGeometry(1, 0.6, 1.6),
-  new THREE.MeshStandardMaterial({ color: 0x4fc3ff })
-);
-kart.position.y = 0.3;
+// ---------- 4. 小车 ----------
+/**
+ * 造一辆小车。
+ *
+ * 为什么用 Group 而不是一个 Mesh？
+ * 一辆车是由好几个零件拼起来的（车身、车头、驾驶舱、四个轮子）。
+ * Group 就是一个"容器"：移动或旋转它，里面的零件会整体跟着动——
+ * 对外表现就像一辆完整的车。
+ * 3D 里做人物、道具、场景，全靠这个办法把零件组装起来。
+ *
+ * @returns {{group: THREE.Group, wheels: Array}} group 是整辆车，
+ *          wheels 里的每一项记录了轮子本身和它的转向支架
+ */
+function createKart() {
+  const group = new THREE.Group();
+
+  const paintMat = new THREE.MeshStandardMaterial({ color: 0x4fc3ff, roughness: 0.45 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x27364f, roughness: 0.85 });
+
+  // 车身：扁长的一块
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.28, 1.6), paintMat);
+  body.position.y = 0.38;
+  group.add(body);
+
+  // 车头：窄一点、矮一点的一小块。
+  // 没有它，从后面看根本分不出车头车尾——这正是之前"一个方块"最大的问题。
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.18, 0.45), paintMat);
+  nose.position.set(0, 0.3, -0.92);
+  group.add(nose);
+
+  // 驾驶舱：放在车尾一侧，进一步强化方向感
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.34, 0.52), darkMat);
+  cabin.position.set(0, 0.69, 0.12);
+  group.add(cabin);
+
+  // 轮子：一个"躺下"的圆柱。
+  // 圆柱默认是竖着的（轴朝 Y，像个柱子）。这里在**几何体**上转 90° 让它躺下
+  // （轴朝 X，也就是左右方向）——而不是在 mesh 上转。
+  // 这样 mesh.rotation.x 就能专门留给"滚动"，两个旋转不会打架。
+  const wheelGeo = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.18, 16);
+  wheelGeo.rotateZ(Math.PI / 2);
+
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x14141c, roughness: 0.9 });
+
+  const WHEEL_X = 0.56;          // 左右轮距的一半
+  const WHEEL_FRONT_Z = -0.55;   // 前轮的前后位置（-Z 是车头方向）
+  const WHEEL_BACK_Z = 0.58;     // 后轮
+
+  const wheels = [];
+
+  for (const [x, z, steerable] of [
+    [-WHEEL_X, WHEEL_FRONT_Z, true],
+    [ WHEEL_X, WHEEL_FRONT_Z, true],
+    [-WHEEL_X, WHEEL_BACK_Z,  false],
+    [ WHEEL_X, WHEEL_BACK_Z,  false],
+  ]) {
+    const mesh = new THREE.Mesh(wheelGeo, wheelMat);
+    mesh.position.y = WHEEL_RADIUS;
+
+    if (steerable) {
+      // 前轮要"一边转向一边滚动"。两个旋转都设在同一个物体上会互相干扰
+      // （欧拉角是按固定顺序叠加的），所以套一层支架：
+      // 支架负责转向，轮子自己负责滚动。
+      const pivot = new THREE.Group();
+      pivot.position.set(x, 0, z);
+      pivot.add(mesh);
+      group.add(pivot);
+      wheels.push({ mesh, pivot });
+    } else {
+      mesh.position.set(x, WHEEL_RADIUS, z);
+      group.add(mesh);
+      wheels.push({ mesh, pivot: null });
+    }
+  }
+
+  return { group, wheels };
+}
+
+const { group: kart, wheels } = createKart();
 scene.add(kart);
 
 
@@ -159,12 +234,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 
-// ---------- 7b. 相机实时调节 ----------
-// 为什么要做这个：手感是主观的。上一轮我按「有点偏大」猜了一个数，
+// ---------- 7b. 参数面板 + 实时调节 ----------
+// 为什么要做这个：手感是主观的。之前我按「有点偏大」猜了一个数，
 // 结果直接调过头变成「过于小」。与其让我猜、你来回报感受，
 // 不如你自己边开边调——你的手指比我准。
-//
-// 调满意后把右上角的数字告诉我，我把它固化成默认值。
 const camInfo = document.createElement('div');
 camInfo.style.cssText = [
   'position:fixed', 'right:10px', 'top:10px', 'z-index:10',
@@ -174,10 +247,13 @@ camInfo.style.cssText = [
 ].join(';');
 document.body.appendChild(camInfo);
 
+let liveSpeed = 0; // 面板上显示的实际车速，由帧循环更新
+
 function showCamInfo() {
   camInfo.textContent =
-    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°    速度 ×${speedScale.toFixed(1)}\n` +
-    `[ ] 调距离      - = 调俯角      , . 调速度`;
+    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°    峰值 ×${speedScale.toFixed(1)}\n` +
+    `当前车速 ${liveSpeed.toFixed(1)} 米/秒\n` +
+    `[ ] 调距离   - = 调俯角   , . 调速度`;
 }
 showCamInfo();
 
@@ -203,7 +279,8 @@ window.addEventListener('keydown', (e) => {
 
 // ---------- 8. 车的状态 + 计时器 ----------
 let state = createKartState();
-const clock = new THREE.Clock(); // 用来量"距上一帧过了多少秒"
+let wheelRoll = 0;                 // 轮子累计转过的角度
+const clock = new THREE.Clock();   // 用来量"距上一帧过了多少秒"
 
 
 // ---------- 8b. 相机跟随用的暂存对象 ----------
@@ -229,23 +306,32 @@ function frame() {
   // 读键盘 → 变成"意图"
   // 上和下写成相减：同时按住时 1 - 1 = 0 自然抵消，不用额外判断
   const input = {
-    // 乘上速度倍率：这样调速度不用动 kart-math 里的基准常量
-    forward: ((keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
-           - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0)) * speedScale,
+    forward: (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
+           - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0),
     turn: (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
         - (keys.isHeld('ArrowRight') || keys.isHeld('d') ? 1 : 0),
   };
 
-  // 算新状态（这一步有 kart-math 的测试护航）
-  state = stepKart(state, input, dt);
+  // 算新状态（这一步有 kart-math 的 22 个测试护航）。
+  // 速度倍率乘在「峰值速度」上，而不是乘在油门上——
+  // 那样只是让车更快到顶，不会真的更快。
+  state = stepKart(state, input, dt, MAX_SPEED * speedScale);
 
-  // 把状态画到 3D 物体上
-  kart.position.x = state.x;
-  kart.position.z = state.z;
+  // ---- 把状态画到车上 ----
+  kart.position.set(state.x, 0, state.z);
   kart.rotation.y = state.yaw;
 
-  // 相机该在的位置：车后上方
-  // 车头朝 (-sin, 0, -cos)，所以"车后"是 (+sin, 0, +cos)
+  // 轮子：按走过的距离滚动。
+  // 走过的距离 ÷ 轮子周长 × 2π = 转过多少弧度，化简就是 距离 ÷ 半径。
+  // 倒车时 speed 是负的，轮子自然反过来转。
+  wheelRoll += (state.speed * dt) / WHEEL_RADIUS;
+  for (const w of wheels) {
+    if (w.pivot) w.pivot.rotation.y = input.turn * MAX_STEER_VISUAL; // 前轮跟着方向盘摆
+    w.mesh.rotation.x = wheelRoll;                                    // 四个轮子都在滚
+  }
+
+  // ---- 相机 ----
+  // 该在的位置：车后上方。车头朝 (-sin, 0, -cos)，所以"车后"是 (+sin, 0, +cos)
   camTarget.set(
     state.x + Math.sin(state.yaw) * cam.distance,
     camHeightOf(cam),
@@ -259,6 +345,13 @@ function frame() {
   camera.position.lerp(camTarget, approachFactor(CAM_FOLLOW_RATE, dt));
 
   camera.lookAt(state.x, 0.3, state.z);
+
+  // 面板上的车速只在变化时才更新 DOM（没必要每帧都写一遍）
+  const shown = Math.round(state.speed * 10) / 10;
+  if (shown !== liveSpeed) {
+    liveSpeed = shown;
+    showCamInfo();
+  }
 
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
