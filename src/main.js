@@ -16,6 +16,11 @@ import {
   MAX_SPEED, MAX_STEER,
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
+import { feel, installFeel } from './feel.js';
+
+// 把「速度感」调参口挂到 window.__feel —— 改完**下一帧**生效，不用改代码、不用刷新。
+// 用法：__feel.punchy() / __feel.reset() / __feel.set({fovSpeed: 14}) / __feel.show()
+installFeel();
 
 
 // ---------------------------------------------------------------------------
@@ -80,22 +85,17 @@ const TURN_SMOOTH_TAU = 0.14;
 //  横向 fx 由「方位角滞后」驱动：右弯时方位角拖在车头左侧 → 镜头回摆 →
 //  车落到画面偏左、右侧（弯内）的路看得到。这正是用户描述的那种驾驶视角。
 // ---------------------------------------------------------------------------
-/** 抵消多少比例的方位角滞后 → 静态时留下几度真实滞后，其余进画面（参考值 0.72） */
-const CAM_FRAME_LAG_CANCEL = 0.72;
+// 注：构图的可调量（滞后抵消比例 / 横向上限 / 死区）都在 feel.js，
+//     可以在浏览器控制台用 __feel 改，下一帧生效。这里只留不常调的结构常量。
 /** 构图角变化速率上限（rad/s）—— 防止朝向突变变成一记猛甩 */
 const CAM_FRAME_ANG_RATE = 0.85;
-/** 横向构图硬上限（NDC）。超过约 1/3 个半屏，主体就不像主体了（参考值 0.30） */
-const CAM_FRAME_X_MAX = 0.30;
 /**
- * 构图死区（度）：方位角滞后小于它 → **画面完全不动**。
+ * 构图死区（度）见 feel.leadDeadDeg / feel.leadFullDeg：
+ * 滞后小于死区 → **画面完全不动**（直线上的小修正不晃镜头）；
+ * 大于满额值 → 满额；中间 smoothstep 平滑过渡。
  *
- * 用户实测原话：「它不会每次左右转弯都会有镜头偏移的，每次左右转弯都有偏移的话，
- * 玩起来头会很晕。」参考实现的构图是连续响应的（没有死区），这一条是我们
- * 按体感**有意加的偏离**：只有真过弯才动画面，直线上的小修正不晃镜头。
+ * 参考的构图是连续响应的（没有死区），这一层是按用户体感**有意加的偏离**。
  */
-const CAM_LEAD_DEAD_DEG = 10;
-/** 滞后超过它 → 构图满额；中间用 smoothstep 平滑过渡（死区边界不跳） */
-const CAM_LEAD_FULL_DEG = 20;
 
 // ---- 舒适边界（照参考 Camera.ts：这两条「就是舒适性的全部」）----
 /** ① 方位角最多落后车头这么多度（参考 MAX_LAG=26°，原文：它决定玩家能不能看到前方） */
@@ -106,8 +106,6 @@ const CAM_MAX_ARM_RATE = 2.0;
 const CAM_MAX_ARM_RATE_LOST = 3.2;
 /** 过弯估计的平滑时间常数（参考 CORNER_TAU=0.15）—— 否则死区边界会抖 */
 const CAM_CORNER_TAU = 0.15;
-/** 满速时镜头额外拉远多少米（参考 ARM_DIST_SPEED；臂长和视野是一对，一起动才有速度感） */
-const ARM_DIST_SPEED = 1.2;
 /** 车压在画面下半，把上半屏让给前方的路（参考值 -0.19） */
 const CAM_FRAME_Y = -0.19;
 /** 速度越快再压低一点，进一步把视线推向前方 */
@@ -124,10 +122,8 @@ const CAM_SUBJ_UP = 0.45;
 //  数值上的速度再高，画面上没有变化就等于看不见。参考项目靠张开**视野**
 //  （而不是拉长臂长——那会把主体固定成同一个大小，反而看不出速度）。
 // ---------------------------------------------------------------------------
-/** 静止时的垂直视野（度）—— 和原来一样 */
+/** 静止时的垂直视野（度）。张开幅度是 feel.fovSpeed（见 feel.js，可在控制台改） */
 const FOV_BASE = 60;
-/** 满速时额外张开多少度（参考项目 FOV_SPEED 是 5，这里给大一点更明显） */
-const FOV_SPEED = 8;
 
 /**
  * 速度倍率：乘在 kart-math 的 MAX_SPEED 上。
@@ -475,7 +471,8 @@ function renderPanel() {
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
-    `[ ] 距离  - = 俯角  , . 速度  P 收起面板`;
+    `[ ] 距离  - = 俯角  , . 速度  P 收起面板\n` +
+    `控制台：__feel.punchy() 切「猛」  __feel.show() 看当前值`;
   if (text !== lastPanelText) {
     lastPanelText = text;
     panel.textContent = text;
@@ -665,12 +662,12 @@ function frame() {
 
   // ② 视野随速度张开 + 臂长随速度拉远 —— 这两个是**一对**：
   //    臂长拉长会把车缩小，视野张开让世界扑面而来；一起动才「看得见加速度」。
-  const fovNow = fovForSpeed(FOV_BASE, FOV_SPEED, state.speed, MAX_SPEED * speedScale);
+  const fovNow = fovForSpeed(FOV_BASE, feel.fovSpeed, state.speed, MAX_SPEED * speedScale);
   if (Math.abs(camera.fov - fovNow) > 1e-3) {
     camera.fov = fovNow;
     camera.updateProjectionMatrix();
   }
-  const distNow = armDistFor(cam.distance, ARM_DIST_SPEED, state.speed, MAX_SPEED * speedScale);
+  const distNow = armDistFor(cam.distance, feel.armDistSpeed, state.speed, MAX_SPEED * speedScale);
 
   // ③ 构图角：抵消一部分方位角滞后 → 镜头领进弯道、车因此偏出画面中心。
   //    （右弯时方位角拖在车头左侧 → bearingLag>0 → 构图角为负 → 车偏左，
@@ -678,10 +675,10 @@ function frame() {
   const bearingLag = Math.atan2(Math.sin(camYaw - state.yaw), Math.cos(camYaw - state.yaw));
   //    死区：只有真过弯才动画面（小修正不晃镜头）—— 按用户体感加的一层
   const leadTarget = leadWeight(Math.abs(bearingLag),
-    (CAM_LEAD_DEAD_DEG * Math.PI) / 180, (CAM_LEAD_FULL_DEG * Math.PI) / 180);
+    (feel.leadDeadDeg * Math.PI) / 180, (feel.leadFullDeg * Math.PI) / 180);
   //    参考 CORNER_TAU：估计本身也要平滑，否则死区边界上会抖
   leadSmooth = damp(leadSmooth, leadTarget, CAM_CORNER_TAU, dt);
-  const wantComp = -CAM_FRAME_LAG_CANCEL * bearingLag * leadSmooth;
+  const wantComp = -feel.frameLagCancel * bearingLag * leadSmooth;
   compAng += Math.max(-CAM_FRAME_ANG_RATE * dt,
              Math.min(CAM_FRAME_ANG_RATE * dt, wantComp - compAng));
 
@@ -697,7 +694,7 @@ function frame() {
   const tanV = Math.tan((camera.fov * Math.PI) / 360);
   const tanH = tanV * camera.aspect;
   const sp = Math.min(1, Math.abs(state.speed) / (MAX_SPEED * speedScale));
-  const frameX = Math.max(-CAM_FRAME_X_MAX, Math.min(CAM_FRAME_X_MAX, ndcFromAngle(compAng, tanH)));
+  const frameX = Math.max(-feel.frameXMax, Math.min(feel.frameXMax, ndcFromAngle(compAng, tanH)));
   const frameY = Math.max(CAM_FRAME_Y_MIN, Math.min(CAM_FRAME_Y_MAX, CAM_FRAME_Y + CAM_FRAME_Y_SPEED * sp));
   frameSubject(camera, state.x, CAM_SUBJ_UP, state.z, frameX, frameY, tanV, tanH);
 
