@@ -52,6 +52,7 @@
     <button class="tiny" id="tilt-btn">体感：关</button>
     <button class="tiny" id="cal-btn">校准</button>
     <button class="tiny" id="inv-btn">反向：关</button>
+    <button class="tiny" id="boost-btn">急转：小</button>
   </div>
 
   <div id="pad">
@@ -84,7 +85,8 @@
 
 import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, mergeTurn }
   from '/src/pad-input.js';
-import { rollDegrees, angleDifference, steerFromTilt, screenAngle } from '/src/tilt.js';
+import { rollDegrees, angleDifference, steerFromTilt, screenAngle, combineSteer }
+  from '/src/tilt.js';
 
 const padEl = document.getElementById('pad');
 const dot = document.getElementById('dot');
@@ -114,8 +116,17 @@ let zero = null;           // 校准中位
 let sensorAt = 0;          // 最后一次收到传感器数据的时刻
 let candidate = null;      // 稳定判定用的候选零位
 let stableAt = 0;
-let lastBeta = null;       // 原始读数，显示出来供现场判断（我这台机器推不出真实姿势对应值）
+let lastBeta = null;       // 原始读数，显示出来供现场判断（轴的对应关系是设备事实）
 let lastGamma = null;
+
+// 「急转加成」：角速度（陀螺仪，"你拧得多快"）带来的额外转向。
+// 为什么它只做加成：角速度**松手就归零**，纯用它就没法保持一个弯。
+const RATE_STALE_MS = 300;   // 多久没收到角速度就当作"没在拧"
+const BOOST_STEPS = [0, 0.25, 0.5, 0.8];
+const BOOST_LABELS = ['关', '小', '中', '大'];
+let boostIdx = 1;            // 默认"小"
+let rateDps = 0;             // 当前拧的角速度（度/秒）
+let rateAt = 0;
 
 /** 当前屏幕方向（各家浏览器报告方式不一致，交给 tilt.js 归一） */
 function currentScreenAngle() {
@@ -131,7 +142,19 @@ function currentScreenAngle() {
 function tiltTurn() {
   if (!tiltOn || raw === null || zero === null) return 0;
   if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
-  return steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, invert);
+  const base = steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, invert);
+  // 「拧得快 = 急转」：角速度只做短暂加成（它的读数在 300ms 内才算数）
+  const fresh = performance.now() - rateAt <= RATE_STALE_MS;
+  const rate = fresh ? rateDps * (invert ? -1 : 1) : 0;
+  return combineSteer(base, rate, BOOST_STEPS[boostIdx]);
+}
+
+/** 陀螺仪：只关心"你拧得多快"（rotationRate 单位是度/秒） */
+function onMotion(e) {
+  const r = e.rotationRate;
+  if (!r || !Number.isFinite(r.alpha)) return;
+  rateDps = r.alpha;
+  rateAt = performance.now();
 }
 
 function onOrientation(e) {
@@ -170,7 +193,13 @@ async function enableTilt() {
         return;
       }
     }
+    // 陀螺仪是**另一个 API**，iOS 要**单独再申请一次**（这点资料里写得很清楚，很容易漏）
+    if (typeof DeviceMotionEvent !== 'undefined'
+        && typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { await DeviceMotionEvent.requestPermission(); } catch { /* 不给就算了，只用倾角 */ }
+    }
     window.addEventListener('deviceorientation', onOrientation);
+    window.addEventListener('devicemotion', onMotion);
     // 转屏会改变"左右"的定义，中位必须作废重校
     window.addEventListener('orientationchange', () => { zero = null; candidate = null; });
     screen?.orientation?.addEventListener?.('change', () => { zero = null; candidate = null; });
@@ -188,6 +217,7 @@ tiltBtn.addEventListener('click', () => {
   if (tiltOn) {
     tiltOn = false;
     window.removeEventListener('deviceorientation', onOrientation);
+    window.removeEventListener('devicemotion', onMotion);
     tiltBtn.textContent = '体感：关';
     tiltBtn.classList.remove('on');
   } else {
@@ -210,6 +240,15 @@ document.getElementById('inv-btn').addEventListener('click', (ev) => {
   ev.currentTarget.textContent = '反向：' + (invert ? '开' : '关');
   ev.currentTarget.classList.toggle('on', invert);
 });
+
+const boostBtn = document.getElementById('boost-btn');
+boostBtn.addEventListener('click', () => {
+  boostIdx = (boostIdx + 1) % BOOST_STEPS.length;
+  boostBtn.textContent = '急转：' + BOOST_LABELS[boostIdx];
+  boostBtn.classList.toggle('on', boostIdx > 0);
+});
+boostBtn.textContent = '急转：' + BOOST_LABELS[boostIdx];
+boostBtn.classList.toggle('on', boostIdx > 0);
 
 // ---------------------------------------------------------------------------
 //  发送
@@ -246,7 +285,7 @@ async function send() {
   const fmt = (x) => (x === null || x === undefined ? '—' : Math.round(x));
   echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn.toFixed(2)}`
     + (tiltOn
-      ? `  β${fmt(lastBeta)} γ${fmt(lastGamma)} 屏${currentScreenAngle()} 滚${fmt(raw)}`
+      ? `  β${fmt(lastBeta)} γ${fmt(lastGamma)} 屏${currentScreenAngle()} 滚${fmt(raw)} 拧${fmt(rateDps)}`
       : '');
 }
 
