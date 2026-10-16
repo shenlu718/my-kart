@@ -88,6 +88,7 @@ function current() {
 }
 
 let okCount = 0, failCount = 0;
+let seq = 0;   // 包序号：让游戏侧能丢弃乱序/迟到的旧包（否则转向会抖）
 
 // ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
 const sending = !new URLSearchParams(location.search).has('nostream');
@@ -98,7 +99,7 @@ async function send() {
     const res = await fetch('/api/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(current()),
+      body: JSON.stringify({ ...current(), seq: seq++ }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     okCount++;
@@ -114,6 +115,13 @@ async function send() {
 }
 
 // 按下 / 松开：用 Pointer Events，天然支持多点触控
+//
+// ★ 松手要听三个事件，缺一不可（照参考项目的做法）：
+//   pointerup / pointercancel / **lostpointercapture**
+//   少了 lostpointercapture：一旦捕获被系统收走（来电、通知、手势冲突），
+//   按钮会永远停在"按着"，车就一直冲 —— 这是实测过的真 bug。
+//   另外**不听 pointerleave**：捕获之后手指滑出按钮不该算松手，
+//   否则滑一下就会突然断油门。
 for (const el of pad.querySelectorAll('.btn')) {
   const key = el.dataset.k, val = Number(el.dataset.v);
   el.addEventListener('pointerdown', (e) => {
@@ -124,15 +132,15 @@ for (const el of pad.querySelectorAll('.btn')) {
     send();
   });
   const up = (e) => {
+    if (!held.has(e.pointerId + ':' + key)) return;
     held.delete(e.pointerId + ':' + key);
-    // 该键还有其他手指按着就保持高亮
     const stillHeld = [...held.keys()].some((k) => k.endsWith(':' + key));
     if (!stillHeld) el.classList.remove('on');
     send();
   };
-  el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', up);
-  el.addEventListener('pointerleave', up);
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    el.addEventListener(name, up);
+  }
 }
 
 // 心跳：既保证"松手"能被服务器感知，也用来测连接
@@ -141,8 +149,27 @@ send();
 
 // 切到后台就当作全部松开（安全：车不该因为手机进后台而一直冲）
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { held.clear(); document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on')); send(); }
+  if (document.hidden) { releaseAll(); }
+  else { requestWakeLock(); }   // 回到前台再要一次：锁在切后台时会被系统释放
 });
+
+/** 一次松开所有按钮（切后台、页面隐藏、出错时都走它） */
+function releaseAll() {
+  held.clear();
+  document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on'));
+  send();
+}
+
+// ★ 屏幕常亮（照参考项目）：不然玩到一半手机息屏 —— 操控直接断。
+//   注意：锁会在页面切到后台时被系统自动释放，所以回前台要重新申请。
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if (document.hidden) return;
+    wakeLock = await navigator.wakeLock?.request('screen');
+  } catch { /* 不支持就算了，不影响玩 */ }
+}
+requestWakeLock();
 </script>
 </body>
 </html>

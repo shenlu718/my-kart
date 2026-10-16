@@ -143,7 +143,9 @@ const server = http.createServer(async (req, res) => {
         const n = Number(v);
         return Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0;
       };
-      remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), at: Date.now() };
+      // 序号原样透传（游戏侧用它丢弃乱序/重复的包）。没带就不放这个字段。
+      const seq = Number.isSafeInteger(msg && msg.seq) && msg.seq >= 0 ? msg.seq : undefined;
+      remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), seq, at: Date.now() };
       broadcastInput();
       res.writeHead(204, { 'Cache-Control': 'no-store' });
       res.end();

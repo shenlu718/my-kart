@@ -15,20 +15,26 @@
 /** 超过这么久没收到手机更新，就当作"没在按" */
 export const REMOTE_TIMEOUT_MS = 800;
 
-/** 一份远程输入快照。at = 最后一次收到更新的时刻（毫秒，performance.now 的时钟） */
+/** 一份远程输入快照。at = 最后一次收到更新的时刻（毫秒）；seq = 包序号 */
 export function createRemoteInput() {
-  return { forward: 0, turn: 0, at: -Infinity };
+  return { forward: 0, turn: 0, seq: -1, at: -Infinity };
 }
 
 /**
  * 把手机发来的一条消息并进快照。
- * 消息形状：{ forward: -1|0|1, turn: -1|0|1 }。
+ * 消息形状：{ forward: -1|0|1, turn: -1|0|1, seq?: number }。
  * 非法/缺失的值一律当 0，并且钳到 [-1, 1] —— 不要相信网络上的输入。
  *
- * @param {{forward:number, turn:number, at:number}} prev 上一份快照
- * @param {{forward?:number, turn?:number}|null} msg 手机发来的消息
+ * ★ 序号（seq）的作用：丢弃**过期/重复**的包。
+ *   HTTP 走局域网不保证到达顺序；一个迟到的旧包会把刚转向的方向拽回去，
+ *   表现就是"转向在抖"。序号比当前的旧 → 整个包丢掉，连时刻都不更新
+ *   （否则一个迟到的包会让"断连超时"重新计时）。
+ *   照参考项目的做法（它的协议里 `Number.isSafeInteger(p.seq)` 是必填）。
+ *
+ * @param {{forward:number, turn:number, seq:number, at:number}} prev 上一份快照
+ * @param {{forward?:number, turn?:number, seq?:number}|null} msg 手机发来的消息
  * @param {number} now 现在（毫秒）
- * @returns {{forward:number, turn:number, at:number}} 新快照（不改 prev）
+ * @returns {{forward:number, turn:number, seq:number, at:number}} 新快照（不改 prev）
  */
 export function applyRemote(prev, msg, now) {
   const clamp = (v) => {
@@ -36,9 +42,13 @@ export function applyRemote(prev, msg, now) {
     if (!Number.isFinite(n)) return 0;
     return Math.max(-1, Math.min(1, n));
   };
+  const hasSeq = Number.isSafeInteger(msg && msg.seq) && msg.seq >= 0;
+  const prevSeq = Number.isSafeInteger(prev && prev.seq) ? prev.seq : -1;
+  if (hasSeq && msg.seq <= prevSeq) return prev;      // 过期/重复的包：整包丢弃
   return {
     forward: clamp(msg && msg.forward),
     turn: clamp(msg && msg.turn),
+    seq: hasSeq ? msg.seq : prevSeq,
     at: Number.isFinite(now) ? now : -Infinity,
   };
 }
