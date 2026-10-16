@@ -21,7 +21,9 @@
 // ============================================================================
 
 import http from 'node:http';
+import https from 'node:https';
 import { readFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { exec } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
@@ -206,6 +208,28 @@ const server = http.createServer(async (req, res) => {
     res.end(`404 找不到这个文件：${urlPath}\n\n检查一下文件名有没有拼错。`);
   }
 });
+
+// ---------------------------------------------------------------------------
+//  追加一个 HTTPS 监听（体感转向需要「安全上下文」）
+//
+//  MDN：DeviceOrientationEvent 只在安全上下文（HTTPS）可用 —— 安卓也一样，
+//  不是 iOS 专属。所以 http://192.168.x.x 上体感是拿不到数据的，必须 https。
+//
+//  这里**复用上面那个 request 监听器**，不复制一份逻辑（复制迟早两边跑偏）。
+//  证书没有就静默跳过：不影响现在能玩的 HTTP 那条路。
+// ---------------------------------------------------------------------------
+const CERT = resolve(ROOT, 'certs', 'cert.pem');
+const KEY = resolve(ROOT, 'certs', 'key.pem');
+const HTTPS_PORT = 8443;
+if (existsSync(CERT) && existsSync(KEY)) {
+  const requestHandler = server.listeners('request')[0];
+  https.createServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }, requestHandler)
+    .listen(HTTPS_PORT, '0.0.0.0', () => {
+      console.log('');
+      console.log(`  🔒 HTTPS 已开（体感转向要用这个）：端口 ${HTTPS_PORT}`);
+      console.log('     手机第一次会警告"连接不私密" → 选「高级 → 继续前往」');
+    });
+}
 
 
 /** 用系统默认浏览器打开网址 */
