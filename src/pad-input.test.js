@@ -9,7 +9,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, PAD_ACTIONS,
+  createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, mergeTurn,
+  PAD_ACTIONS,
 } from './pad-input.js';
 
 
@@ -106,4 +107,20 @@ test('★ 手柄页必须用 padInput() 算输入，不能自己再存一份映�
   const html = readFileSync(new URL('../phone/index.html', import.meta.url), 'utf8');
   assert.ok(html.includes('padInput(pad)'), '发出去的输入必须来自 padInput()');
   assert.ok(html.includes("from '/src/pad-input.js'"), '必须 import 共用模块，而不是内联一份');
+});
+
+// ---------------------------------------------------------------------------
+//  按钮转向 + 体感转向的合成
+// ---------------------------------------------------------------------------
+test('★ 合成：按钮按着就听按钮（手动优先），否则听体感', () => {
+  assert.equal(mergeTurn(1, -0.8), 1, '按着方向键时应当听按钮，不被体感干扰');
+  assert.equal(mergeTurn(-1, 0.8), -1);
+  assert.equal(mergeTurn(0, 0.6), 0.6, '没按按钮时听体感');
+  assert.equal(mergeTurn(0, 0), 0);
+});
+
+test('合成：输出永远钳在 [-1,1]', () => {
+  assert.equal(mergeTurn(2, 0), 1);
+  assert.equal(mergeTurn(0, -2), -1);
+  assert.equal(mergeTurn(NaN, 0.5), 0.5, 'NaN 当 0 处理');
 });

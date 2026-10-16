@@ -14,12 +14,17 @@
     user-select: none; -webkit-user-select: none; touch-action: none;
   }
   #status {
-    position: fixed; top: 0; left: 0; right: 0; padding: 6px 12px;
-    display: flex; gap: 12px; align-items: center; font-size: 13px;
+    position: fixed; top: 0; left: 0; right: 0; padding: 6px 12px; z-index: 2;
+    display: flex; gap: 10px; align-items: center; font-size: 13px;
     background: #0b1020dd; border-bottom: 1px solid #24365a;
   }
   #dot { width: 10px; height: 10px; border-radius: 50%; background: #b04a4a; }
   #dot.on { background: #4ac07a; }
+  .tiny {
+    border: 1px solid #24365a; border-radius: 8px; background: #101a33; color: #8fb3e0;
+    padding: 3px 9px; font-size: 12px;
+  }
+  .tiny.on { background: #1d4f8a; border-color: #4f9ad8; color: #eaf4ff; }
   #pad { position: fixed; inset: 56px 0 0 0; display: flex; }
   /* 左右各占一半；按钮按**可用宽度均分**（用 flex 而不是固定 vw，
      否则竖屏下两列加起来会超出屏幕、右侧被裁掉）*/
@@ -35,7 +40,7 @@
   .btn.wide { height: 46vh; max-height: 320px; }
   #hint {
     position: fixed; bottom: 6px; left: 0; right: 0; text-align: center;
-    font-size: 12px; color: #4a6a9a;
+    font-size: 12px; color: #4a6a9a; z-index: 2;
   }
 </style>
 </head>
@@ -44,6 +49,8 @@
     <span id="dot"></span>
     <span id="state">连接中…</span>
     <span id="echo" style="margin-left:auto"></span>
+    <button class="tiny" id="tilt-btn">体感：关</button>
+    <button class="tiny" id="cal-btn">校准</button>
   </div>
 
   <div id="pad">
@@ -60,73 +67,175 @@
 
 <script type="module">
 // ============================================================================
-//  手机手柄 —— 把「哪个手指按着哪个键」发回电脑上的 dev-server
+//  手机手柄 —— 把「手指按了哪些键」+「手机怎么倾」发回电脑上的 dev-server
 //
-//  ★ 按钮 → 输入的映射在 src/pad-input.js（纯模块，有 9 条单元测试）。
-//    之前这段内联在这里，键写错了一个字导致"按了没反应"，
-//    而浏览器里没有测试、只看语法检查发现不了。现在映射在可测的那一侧。
+//  两块逻辑都在**可测的模块**里（手机页本身没有测试）：
+//    src/pad-input.js   按钮 → 输入（含按钮/体感的合成规则）
+//    src/tilt.js        手机姿态 → 转向量（含 atan2、平放守卫、屏幕方向三个坑）
 //
-//  为什么用 HTTP POST 而不是 WebSocket：
-//    不需要任何依赖、不需要证书、调试时用浏览器就能看到请求。
-//  为什么还要心跳：手机切后台/锁屏时不保证发出"松手"事件，
-//    靠 60ms 一次的心跳，服务器那边超时（800ms）就自动当作没在按。
+//  ★ 体感必须走 https：MDN 写明 DeviceOrientationEvent 只在安全上下文可用，
+//    安卓也一样。用 http 打开时下面会直接提示"体感需要 https"。
+//
+//  为什么用 HTTP POST 而不是 WebSocket：不需要依赖、不需要协议，调试可见。
+//  为什么不设超时不行：连不上时会挂到系统 TCP 超时（~30 秒），
+//    界面就会显示成"往返 29000ms"，把人误导成"延迟高"。
 // ============================================================================
 
-import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput }
+import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, mergeTurn }
   from '/src/pad-input.js';
+import { rollDegrees, angleDifference, steerFromTilt, screenAngle } from '/src/tilt.js';
 
 const padEl = document.getElementById('pad');
 const dot = document.getElementById('dot');
 const stateEl = document.getElementById('state');
 const echoEl = document.getElementById('echo');
+const tiltBtn = document.getElementById('tilt-btn');
+const calBtn = document.getElementById('cal-btn');
 
 const pad = createPadState();
-let seq = 0;   // 包序号：让游戏侧能丢弃乱序/迟到的旧包（否则转向会抖）
+let seq = 0;             // 包序号：让游戏侧丢弃乱序/迟到的旧包
+let rttMs = null;
 
 // ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
 const sending = !new URLSearchParams(location.search).has('nostream');
 
-let rttMs = null;
+// ---------------------------------------------------------------------------
+//  体感状态
+// ---------------------------------------------------------------------------
+const TILT_RANGE_DEG = 25;   // 打到满舵需要倾斜多少度（越大越"迟钝"）
+const SENSOR_STALE_MS = 600; // 传感器多久没数据就当作失效（切后台等）
+const CAL_STABLE_MS = 160;   // 中位校准：姿势**稳定这么久**才取零
 
+let tiltOn = false;
+let raw = null;            // 当前滚转角（度）
+let zero = null;           // 校准中位
+let sensorAt = 0;          // 最后一次收到传感器数据的时刻
+let candidate = null;      // 稳定判定用的候选零位
+let stableAt = 0;
+
+/** 当前屏幕方向（各家浏览器报告方式不一致，交给 tilt.js 归一） */
+function currentScreenAngle() {
+  return screenAngle({
+    legacy: window.orientation,
+    angle: screen?.orientation?.angle,
+    type: screen?.orientation?.type,
+    landscape: matchMedia('(orientation: landscape)').matches,
+  });
+}
+
+/** 体感给出的转向量；没数据/没校准/数据过期一律 0（不能让车因为传感器坏了就乱转） */
+function tiltTurn() {
+  if (!tiltOn || raw === null || zero === null) return 0;
+  if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
+  return steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, false);
+}
+
+function onOrientation(e) {
+  if (!Number.isFinite(e.beta) || !Number.isFinite(e.gamma)) return;
+  const v = rollDegrees(e.beta, e.gamma, currentScreenAngle());
+  if (v === null) { raw = null; zero = null; return; }   // 手机平放：给不出稳定滚转角
+  const now = performance.now();
+  raw = v;
+  sensorAt = now;
+  // 中位校准：不是"按一下就取当前值"，而是**姿势稳定 160ms 才取零**（乱动时取的零是错的）
+  if (zero === null) {
+    if (candidate === null || Math.abs(angleDifference(raw, candidate)) > 3) {
+      candidate = raw;
+      stableAt = now;
+    }
+    if (now - stableAt >= CAL_STABLE_MS) { zero = raw; candidate = null; }
+  }
+}
+
+async function enableTilt() {
+  if (!window.isSecureContext) {
+    stateEl.textContent = '体感需要 https 打开（现在不是安全上下文）';
+    return;
+  }
+  if (typeof DeviceOrientationEvent === 'undefined') {
+    stateEl.textContent = '这个浏览器不支持体感';
+    return;
+  }
+  try {
+    // iOS 需要显式授权（安卓一般不需要）；这个调用还必须在真实点击里发生
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') {
+        stateEl.textContent = '体感权限被拒绝';
+        return;
+      }
+    }
+    window.addEventListener('deviceorientation', onOrientation);
+    // 转屏会改变"左右"的定义，中位必须作废重校
+    window.addEventListener('orientationchange', () => { zero = null; candidate = null; });
+    screen?.orientation?.addEventListener?.('change', () => { zero = null; candidate = null; });
+    tiltOn = true;
+    zero = null; candidate = null;
+    tiltBtn.textContent = '体感：开';
+    tiltBtn.classList.add('on');
+    stateEl.textContent = '体感已开 · 拿稳手机校准中…';
+  } catch (e) {
+    stateEl.textContent = '体感开启失败（' + (e.message || e) + '）';
+  }
+}
+
+tiltBtn.addEventListener('click', () => {
+  if (tiltOn) {
+    tiltOn = false;
+    window.removeEventListener('deviceorientation', onOrientation);
+    tiltBtn.textContent = '体感：关';
+    tiltBtn.classList.remove('on');
+  } else {
+    enableTilt();
+  }
+});
+
+calBtn.addEventListener('click', () => {
+  if (!tiltOn) { enableTilt(); return; }
+  if (raw === null || performance.now() - sensorAt > SENSOR_STALE_MS) {
+    stateEl.textContent = '请先拿稳手机';
+    return;
+  }
+  zero = raw; candidate = null;
+  stateEl.textContent = '已重新校准';
+});
+
+// ---------------------------------------------------------------------------
+//  发送
+// ---------------------------------------------------------------------------
 async function send() {
   if (!sending) return;
-  const input = padInput(pad);   // ← 唯一的事实来源，和测试跑同一份代码
+  const p = padInput(pad);                                  // 按钮这一路
+  const input = { forward: p.forward, turn: mergeTurn(p.turn, tiltTurn()) };  // 合成体感
   const t0 = performance.now();
   try {
     const res = await fetch('/api/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, seq: seq++ }),
-      // ★ 必须设超时：不设的话，"连不上"会一直挂到系统 TCP 超时（实测约 30 秒），
-      //   界面上就显示成"往返 29000ms" —— 把人误导成"延迟很高"，其实是根本不通。
-      //   1.5 秒还没响应，直接判失败，显示"连不上"。
+      // ★ 必须设超时：不设的话"连不上"会一直挂到系统 TCP 超时（实测约 30 秒），
+      //   界面上显示成"往返 29000ms" —— 把人误导成"延迟很高"，其实是根本不通。
       signal: AbortSignal.timeout(1500),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    // 往返耗时 = 这次 POST 从发出到拿到响应。**这是客观的延迟读数**：
-    // 换网络路径（校园网 / Tailscale / 数据流量）之后就看这个数 ——
-    // 它直接决定体感转向能不能用（体感对延迟极敏感）。
-    // 指数平滑一下，免得界面上数字乱跳。
     const ms = performance.now() - t0;
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    stateEl.textContent = `已连接 · v4 · 往返 ${Math.round(rttMs)} ms`;
+    if (!tiltOn) stateEl.textContent = `已连接 · v5 · 往返 ${Math.round(rttMs)} ms`;
   } catch (e) {
     dot.classList.remove('on');
-    // 失败就把延迟读数清掉 —— 留着上一次的值会让人以为"还是通的，只是慢"
-    rttMs = null;
+    rttMs = null;   // 失败就清掉，留着旧值会让人以为"还通着，只是慢"
     const why = e && e.name === 'TimeoutError' ? '超时（1.5 秒没响应）' : (e.message || e);
     stateEl.textContent = '连不上电脑（' + why + '）';
   }
-  echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn}`;
+  const t = tiltTurn();
+  echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn.toFixed(2)}`
+    + (tiltOn ? `  倾角 ${raw === null ? '—' : Math.round(raw)}°` : '');
 }
 
 // 按下 / 松开：用 Pointer Events，天然支持多点触控
 //
-// ★ 松手要听三个事件，缺一不可（照参考项目的做法）：
-//   pointerup / pointercancel / **lostpointercapture**
-//   少了 lostpointercapture：一旦捕获被系统收走（来电、通知、手势冲突），
-//   按钮会永远停在"按着"，车就一直冲。
+// ★ 松手要听三个事件：pointerup / pointercancel / **lostpointercapture**。
+//   少了第三个：捕获被系统收走（来电、通知、手势冲突）时按钮会永远停在"按着"，车一直冲。
 //   另外**不听 pointerleave**：捕获之后手指滑出按钮不该算松手。
 for (const el of padEl.querySelectorAll('[data-hold]')) {
   const action = el.dataset.hold;
@@ -156,22 +265,20 @@ function releaseEverything() {
   send();
 }
 
-// 心跳：既保证"松手"能被服务器感知，也用来测连接
 setInterval(send, 60);
 send();
 
-// ★ 屏幕常亮（照参考项目）：不然玩到一半手机息屏 —— 操控直接断。
-//   注意：锁会在页面切到后台时被系统自动释放，所以回前台要重新申请。
+// ★ 屏幕常亮：不然玩到一半手机息屏，操控直接断。
+//   锁会在切后台时被系统释放，所以回前台要重新申请。
 let wakeLock = null;
 async function requestWakeLock() {
   try {
     if (document.hidden) return;
     wakeLock = await navigator.wakeLock?.request('screen');
-  } catch { /* 不支持就算了，不影响玩 */ }
+  } catch { /* 不支持就算了 */ }
 }
 requestWakeLock();
 
-// 切到后台就当作全部松开（安全：车不该因为手机进后台而一直冲）
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseEverything();
   else requestWakeLock();

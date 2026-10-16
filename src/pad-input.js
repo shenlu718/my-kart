@@ -57,6 +57,20 @@ export function isHeld(pad, action) {
 }
 
 /**
+ * 把「按钮转向」和「体感转向」合成一路。
+ *
+ * 规则：**按钮按着就听按钮**（手动优先），否则听体感。
+ * 为什么不是相加：体感和按钮同时有效时相加会变得极难控制（轻轻一歪 + 按住方向 = 满舵打死），
+ * 而玩家按住方向键时，他显然想要一个明确的、不受握姿影响的转向。
+ */
+export function mergeTurn(padTurn, tiltTurn) {
+  const p = Number(padTurn) || 0;
+  if (p !== 0) return Math.max(-1, Math.min(1, p));
+  const t = Number(tiltTurn) || 0;
+  return Math.max(-1, Math.min(1, t));
+}
+
+/**
  * 把当前按着的所有动作合成这一帧的输入。
  * 同向叠加、反向抵消，最后钳到 [-1,1]（turn 超范围会让前轮打死）。
  */
