@@ -58,6 +58,22 @@ export const MAX_STEER = 0.55;
 export const TURN_RATE_CAP = 24;
 export const TURN_RATE_CAP_SPEED = 5;
 
+/**
+ * 最小转弯半径（米）—— 低速也不许原地画小圈。
+ *
+ * 为什么需要（用户实测：「速度比较慢的时候长按转向，左右的视野偏移的加速度过快，使人头晕；
+ * 速度比较快的时候不会出现」）：
+ * 阿克曼转向的半径只由前轮角和轴距决定（R = 轴距/tan(前轮角)），**与速度无关**。
+ * 于是我们这台车满舵半径 = 1.13/tan(0.55) ≈ **1.84 m**，3 m/s 时就以 **93°/s** 绕圈 ——
+ * 位移很小、旋转很快，眼睛读到的是"整幅画面在快速转"，这就是晕的来源；
+ * 速度快时同样的角速度有大量平移相伴，反而不晕。
+ * （参考项目的车满舵半径是 1.6/tan(0.55) ≈ 2.61 m，比我们"稳"。）
+ *
+ * 做法：给偏航率加一条 ω ≤ 车速 / R_min 的限制 —— 低速时把转速压下来，
+ * 车再也画不出小于 R_min 的圈。速度一上来这条限制自然松开。
+ */
+export const MIN_TURN_RADIUS = 2.8;
+
 
 /**
  * 车的初始状态。
@@ -379,10 +395,14 @@ export function snapToTile(value, tile) {
  * @param {number} wheelbase 轴距（米）
  * @returns {number} 偏航率（弧度/秒，已钳制）
  */
-export function yawRateFor(speed, steerAngle, wheelbase = WHEELBASE) {
+export function yawRateFor(speed, steerAngle, wheelbase = WHEELBASE, minRadius = MIN_TURN_RADIUS) {
   const rack = (speed / wheelbase) * Math.tan(steerAngle);
-  const maxYaw = TURN_RATE_CAP / Math.max(TURN_RATE_CAP_SPEED, Math.abs(speed));
-  return Math.max(-maxYaw, Math.min(maxYaw, rack));
+  // ① 抓地上限：高速打死方向不能要求一个轮胎抓不住的弯（否则瞬间打转）
+  const gripCap = TURN_RATE_CAP / Math.max(TURN_RATE_CAP_SPEED, Math.abs(speed));
+  // ② 最小转弯半径：低速也不许原地画小圈（ω = v/R）—— 治"低速转得太快会晕"
+  const radiusCap = minRadius > 0 ? Math.abs(speed) / minRadius : Infinity;
+  const cap = Math.min(gripCap, radiusCap);
+  return Math.max(-cap, Math.min(cap, rack));
 }
 
 
@@ -536,4 +556,84 @@ export function armDistFor(baseDist, perSpeed, speed, maxSpeed = MAX_SPEED) {
   if (!(maxSpeed > 0)) return baseDist;
   const t = Math.min(1, Math.abs(speed) / maxSpeed);
   return baseDist + perSpeed * t;
+}
+
+
+// ===========================================================================
+//  相机整条链路 —— 抽成纯函数，让 main.js 和测具【调同一份代码】
+//
+//  ★ 为什么抽出来（这是本轮最重要的结构改动）：
+//  之前相机逻辑长在 main.js 的帧循环里，改一处只能在浏览器里靠感觉看，
+//  于是每修一个现象就在别处冒一个新现象。参考项目把相机做成一个可离屏
+//  驱动的类（Camera.ts），我们至少要做到「同一条链路能被测具反复跑」。
+//  抽出来之后：main.js 调它、tools/camera-probe.mjs 也调它 —— 没有第二份实现。
+// ===========================================================================
+
+/** 不常调的结构常量（要调手感的部分在 feel.js） */
+export const CAMERA_DEFAULTS = {
+  yawTau: 0.16,        // 方位角弹簧时间常数（秒）
+  maxLagDeg: 26,       // 方位角最多落后车头多少度（参考 MAX_LAG）
+  maxArmRate: 4.5,     // 方位角摆动速率上限（rad/s）—— 见下面注释，必须高于我们的峰值
+  cornerTau: 0.15,     // 过弯估计的平滑（参考 CORNER_TAU）
+  frameAngRate: 0.85,  // 构图角变化率上限（rad/s，参考 FRAME_ANG_RATE）
+  frameY: -0.19,       // 车压在画面下半（参考 FRAME_Y）
+  frameYSpeed: -0.05,
+  frameYMin: -0.32,
+  frameYMax: -0.08,
+  fovBase: 60,         // 静止视野（度）
+};
+
+/**
+ * 走一帧相机。纯函数：不碰 DOM、不碰 THREE、不改传入的对象。
+ *
+ * ★ maxArmRate 为什么是 4.5 而不是参考的 2.0（血泪教训）：
+ *   参考的 2.0 rad/s = 115°/s 是给它自己那台车当**兜底**的 ——
+ *   它的车满舵中位偏航率只有 52°/s，所以那条上限"平时从不生效"。
+ *   我们的车满舵在 7~9 m/s 时是 **172~183°/s**，于是 2.0 变成了每帧都生效的
+ *   机制，还会和 26° 滞后上限每帧互相打架 → 画面摆动在 115~183°/s 之间抽动。
+ *   我们的峰值偏航率是 3.61 rad/s（≈207°/s，见 yawRateFor），所以兜底取 4.5。
+ *   **抄数值必须校尺度** —— 这条写在这里，别再犯。
+ *
+ * @param {{camYaw:number, compAng:number, lead:number, prevCamYaw:number}} cam 相机状态（本函数不改它）
+ * @param {object} ctx {yaw, speed, maxSpeed, dt, aspect, baseDist, angleDeg, feel, tuning?}
+ * @returns {object} 新状态 + 本帧读数（摆动/滞后/视野/臂长/构图/屏幕位置）
+ */
+export function stepCamera(cam, ctx) {
+  const { yaw, speed, maxSpeed, dt, aspect, baseDist, angleDeg, feel } = ctx;
+  const t = { ...CAMERA_DEFAULTS, ...(ctx.tuning || {}) };
+  const DEG = Math.PI / 180;
+  const sp = maxSpeed > 0 ? Math.min(1, Math.abs(speed) / maxSpeed) : 0;
+
+  // ① 方位角弹簧式追车头 —— 唯一该有滞后的地方
+  let camYaw = dampAngle(cam.camYaw, yaw, t.yawTau, dt);
+  // ② 舒适边界一：滞后不超过 maxLagDeg（否则看不到前方）
+  camYaw = clampLagAngle(camYaw, yaw, t.maxLagDeg * DEG);
+  // ③ 舒适边界二：单帧摆动不超过 maxArmRate×dt（兜底，正常驾驶不该生效）
+  camYaw = capStepAngle(cam.prevCamYaw, camYaw, t.maxArmRate * dt);
+
+  const swing = angularRateDegPerSec(cam.prevCamYaw, camYaw, dt);
+  const lag = Math.atan2(Math.sin(camYaw - yaw), Math.cos(camYaw - yaw));
+
+  // ④ 视野随速度张开 + 臂长随速度变化（负 = 收近；见 feel.js 的理由）
+  const fov = fovForSpeed(t.fovBase, feel.fovSpeed, speed, maxSpeed);
+  const armDist = armDistFor(baseDist, feel.armDistSpeed, speed, maxSpeed);
+
+  // ⑤ 构图：死区挡掉小修正 → 平滑 → 变化率上限
+  const leadTarget = leadWeight(Math.abs(lag),
+    feel.leadDeadDeg * DEG, feel.leadFullDeg * DEG);
+  const lead = damp(cam.lead, leadTarget, t.cornerTau, dt);
+  const wantComp = -feel.frameLagCancel * lag * lead;
+  const compAng = cam.compAng + Math.max(-t.frameAngRate * dt,
+    Math.min(t.frameAngRate * dt, wantComp - cam.compAng));
+
+  // ⑥ 屏幕位置（构图解算的输入）
+  const tanV = Math.tan((fov * Math.PI) / 360);
+  const tanH = tanV * aspect;
+  const frameX = Math.max(-feel.frameXMax, Math.min(feel.frameXMax, ndcFromAngle(compAng, tanH)));
+  const frameY = Math.max(t.frameYMin, Math.min(t.frameYMax, t.frameY + t.frameYSpeed * sp));
+
+  return {
+    camYaw, compAng, lead, prevCamYaw: camYaw,
+    swing, lag, fov, armDist, frameX, frameY, tanV, tanH, sp,
+  };
 }

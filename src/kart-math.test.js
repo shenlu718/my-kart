@@ -16,6 +16,7 @@ import {
   angularRateDegPerSec, screenFraction, snapToTile,
   yawRateFor, fovForSpeed, ndcFromAngle, leadWeight, lateralAccel,
   clampLagAngle, capStepAngle, armDistFor,
+  stepCamera, CAMERA_DEFAULTS, MIN_TURN_RADIUS,
   MAX_SPEED, REVERSE_SPEED, ACCEL,
   WHEELBASE, HALF_BASE, MAX_STEER,
 } from './kart-math.js';
@@ -711,4 +712,117 @@ test('臂长随速度：静止是基准，满速加上 perSpeed，且不溢出',
   assert.equal(armDistFor(7, 1.2, 0, 12), 7);
   assert.equal(armDistFor(7, 1.2, 12, 12), 8.2);
   assert.equal(armDistFor(7, 1.2, 24, 12), 8.2, '超过满速不该继续拉远');
+});
+
+
+// ===========================================================================
+//  十一、相机整链路的回归测试（治"改一个冒一个"）
+//
+//  用户原话：「不要每次我发现问题，针对这个问题修改之后，别的问题又此起彼伏
+//  的冒出来，这样的话问题根本修改不完。」
+//
+//  解药不是更小心地改，而是**先把整条链路变成可反复跑的测试**：
+//  stepCamera 是纯函数，下面直接驱动它跑完整场景，把这一轮的两个 bug
+//  变成"以后再犯就会红"的断言。
+// ===========================================================================
+
+/** 跑一段驾驶场景，逐帧收集相机读数 */
+function flyCamera({ targetSpeed, steer = 1, frames = 300, jitter = 0, wheels = 600 }) {
+  const feelCfg = {
+    fovSpeed: 10, armDistSpeed: -0.9,
+    leadDeadDeg: 10, leadFullDeg: 20,
+    frameLagCancel: 0.72, frameXMax: 0.30,
+  };
+  let s = createKartState();
+  for (let i = 0; i < wheels; i++) s = stepKart(s, { forward: 1, turn: 0 }, 1 / 60, targetSpeed);
+
+  let cam = { camYaw: 0, compAng: 0, lead: 0, prevCamYaw: 0 };
+  let turnS = 0;
+  let seed = 12345;
+  const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+
+  const rows = [];
+  for (let i = 0; i < frames; i++) {
+    const dt = (1 / 60) * (1 - jitter + 2 * jitter * rand());
+    turnS = damp(turnS, steer, 0.14, dt);
+    s = stepKart(s, { forward: 1, turn: turnS }, dt, targetSpeed);
+    const out = stepCamera(cam, {
+      yaw: s.yaw, speed: s.speed, maxSpeed: targetSpeed, dt,
+      aspect: 1.6, baseDist: 7.0, angleDeg: 26, feel: feelCfg,
+    });
+    cam = { camYaw: out.camYaw, compAng: out.compAng, lead: out.lead, prevCamYaw: out.prevCamYaw };
+    rows.push({ ...out, speed: s.speed });
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+//  回归 1：7~9 m/s 的"抽帧式抖动"
+//
+//  根因（已复现）：把参考的 MAX_ARM_RATE=2.0 rad/s 抄了过来，而参考那台车
+//  满舵中位偏航率只有 52°/s（那条上限是"平时从不生效"的兜底）；我们的车
+//  满舵在 8 m/s 是 172~183°/s，于是 2.0 变成每帧生效的机制，还和 26° 滞后
+//  上限每帧互相打架（实测 559 帧里切换 339 次，摆动在 115~183 之间跳）。
+// ---------------------------------------------------------------------------
+test('回归：7~9 m/s 满舵时摆动不再每帧狂跳', () => {
+  const rows = flyCamera({ targetSpeed: 8, frames: 300, jitter: 0.15 });
+  let maxJump = 0;
+  for (let i = 1; i < rows.length; i++) {
+    maxJump = Math.max(maxJump, Math.abs(rows[i].swing - rows[i - 1].swing));
+  }
+  assert.ok(maxJump < 20, `相邻帧摆动跳变 ${maxJump.toFixed(1)} °/s，应该平滑（旧实现是 68）`);
+});
+
+test('回归：摆动不超过兜底速率（maxArmRate 真的在兜底）', () => {
+  const rows = flyCamera({ targetSpeed: 8, frames: 300, jitter: 0.15 });
+  const cap = (CAMERA_DEFAULTS.maxArmRate * 180) / Math.PI;
+  const maxSwing = Math.max(...rows.map((r) => r.swing));
+  assert.ok(maxSwing <= cap + 10, `摆动 ${maxSwing.toFixed(0)}°/s 超过兜底 ${cap.toFixed(0)}°/s`);
+});
+
+// ---------------------------------------------------------------------------
+//  回归 2：低速满舵"视野偏移加速度过快、头晕"
+//
+//  根因（已测量）：阿克曼半径与速度无关（我们 1.84 m），3 m/s 时以 93°/s
+//  绕小圈 —— 位移小、旋转快。加最小转弯半径后低速转速被压下来。
+// ---------------------------------------------------------------------------
+test('回归：低速满舵的转速被"最小转弯半径"压住', () => {
+  const slow = yawRateFor(3, MAX_STEER);
+  const radius = 3 / slow;        // R = v / ω
+  assert.ok(radius >= MIN_TURN_RADIUS - 1e-9,
+    `3 m/s 满舵的转弯半径是 ${radius.toFixed(2)} m，不该小于 ${MIN_TURN_RADIUS} m`);
+});
+
+test('回归：低速满舵时画面不该动（滞后落在死区内）', () => {
+  const rows = flyCamera({ targetSpeed: 3, frames: 300 });
+  const maxComp = Math.max(...rows.map((r) => Math.abs(r.compAng)));
+  assert.ok(maxComp < 1e-9, `低速满舵的构图应该为 0，实际 ${maxComp}`);
+});
+
+test('高速满舵仍然会领进弯道（别把功能一起治没了）', () => {
+  const rows = flyCamera({ targetSpeed: 8, frames: 300 });
+  const tail = rows.slice(-40);
+  const maxCompDeg = Math.max(...tail.map((r) => Math.abs((r.compAng * 180) / Math.PI)));
+  assert.ok(maxCompDeg > 5, `8 m/s 满舵应该有构图领入，实际只有 ${maxCompDeg.toFixed(1)}°`);
+});
+
+// ---------------------------------------------------------------------------
+//  回归 3：stepCamera 本身的性质
+// ---------------------------------------------------------------------------
+test('stepCamera 是纯函数：不修改传入的相机状态和上下文', () => {
+  const cam = { camYaw: 0.3, compAng: 0.1, lead: 0.2, prevCamYaw: 0.2 };
+  const snap = { ...cam };
+  const ctx = { yaw: 0.5, speed: 8, maxSpeed: 12, dt: 1 / 60, aspect: 1.6, baseDist: 7, angleDeg: 26, feel: { fovSpeed: 10, armDistSpeed: -0.9, leadDeadDeg: 10, leadFullDeg: 20, frameLagCancel: 0.72, frameXMax: 0.3 } };
+  stepCamera(cam, ctx);
+  assert.deepEqual(cam, snap, '传入的相机状态被改动了');
+});
+
+test('stepCamera：视野随速度张开、臂长随速度收近', () => {
+  const feelCfg = { fovSpeed: 10, armDistSpeed: -0.9, leadDeadDeg: 10, leadFullDeg: 20, frameLagCancel: 0.72, frameXMax: 0.3 };
+  const base = { camYaw: 0, compAng: 0, lead: 0, prevCamYaw: 0 };
+  const slow = stepCamera(base, { yaw: 0, speed: 0, maxSpeed: 12, dt: 1 / 60, aspect: 1.6, baseDist: 7, angleDeg: 26, feel: feelCfg });
+  const fast = stepCamera(base, { yaw: 0, speed: 12, maxSpeed: 12, dt: 1 / 60, aspect: 1.6, baseDist: 7, angleDeg: 26, feel: feelCfg });
+  assert.equal(slow.armDist, 7, '静止时臂长就是基准');
+  assert.ok(fast.fov > slow.fov, '速度高视野应该更广');
+  assert.ok(fast.armDist < slow.armDist, '速度高臂长应该收近（不是拉远）');
 });

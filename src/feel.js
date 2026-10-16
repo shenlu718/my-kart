@@ -36,8 +36,8 @@ export const DEFAULTS = {
 export const PUNCHY = {
   fovSpeed: 16,
   armDistSpeed: -1.4,
-  leadDeadDeg: 8,
-  leadFullDeg: 16,
+  leadDeadDeg: 14,
+  leadFullDeg: 22,
   frameLagCancel: 0.72,
   frameXMax: 0.30,
 };
