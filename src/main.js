@@ -394,6 +394,7 @@ const metrics = {
   leadDeg: 0,      // 镜头领入角（度）—— 过弯时镜头往弯内转了多少
   lead: 0,         // 构图启用程度（0~1）—— 死区把小的修正挡在外面
   frameX: 0,       // 车在屏幕上的横向位置（NDC，0 = 正中；负 = 偏左）
+  offsetV: 0,      // 横向偏移速度（NDC/秒）—— 用户实测："这个速度太快会头晕"
 };
 
 /**
@@ -418,7 +419,7 @@ function renderPanel() {
     `视野     ${metrics.fov.toFixed(1).padStart(5)} °   臂长 ${metrics.armDist.toFixed(1)} 米（静止 ${cam.distance.toFixed(1)}）\n` +
     `相机摆动 ${metrics.swing.toFixed(0).padStart(5)} °/s   峰值 ${metrics.swingPeak.toFixed(0).padStart(5)} °/s\n` +
     `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °   启用 ${(metrics.lead * 100).toFixed(0).padStart(3)} %\n` +
-    `车在画面 ${(metrics.frameX >= 0 ? '+' : '') + metrics.frameX.toFixed(2)}      （0=正中 负=偏左）\n` +
+    `车在画面 ${(metrics.frameX >= 0 ? '+' : '') + metrics.frameX.toFixed(2)}   横移 ${metrics.offsetV.toFixed(2)} NDC/秒\n` +
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
@@ -473,6 +474,9 @@ let turnSmooth = 0;
 /** 摆动读数的平滑值，以及它的 1 秒峰值 */
 let swingSmooth = 0;
 let swingPeak = 0;
+
+/** 上一帧车在屏幕上的横向位置 —— 用来算「横向偏移速度」 */
+let prevFrameX = 0;
 
 /** 复用一个临时点，避免每帧 new 一个 Vector3（减少垃圾回收压力） */
 const kartPoint = new THREE.Vector3();
@@ -622,6 +626,9 @@ function frame() {
   metrics.lead = camOut.lead;
   metrics.frameX = camOut.frameX;
   metrics.armDist = camOut.armDist;
+  // 横向偏移速度（NDC/秒）—— 全屏宽 = 2 NDC，所以 0.84 就是"每秒滑过 42% 屏宽"
+  metrics.offsetV = dt > 0 ? (camOut.frameX - prevFrameX) / dt : 0;
+  prevFrameX = camOut.frameX;
 
   // ④ 车速 / 视野 / 摆动
   metrics.speed = state.speed;

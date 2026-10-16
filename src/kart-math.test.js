@@ -20,6 +20,7 @@ import {
   MAX_SPEED, REVERSE_SPEED, ACCEL,
   WHEELBASE, HALF_BASE, MAX_STEER,
 } from './kart-math.js';
+import { feel, DEFAULTS as FEEL_DEFAULTS } from './feel.js';
 
 
 const atSpeed = (speed) => ({ x: 0, z: 0, yaw: 0, speed });
@@ -726,13 +727,9 @@ test('臂长随速度：静止是基准，满速加上 perSpeed，且不溢出',
 //  变成"以后再犯就会红"的断言。
 // ===========================================================================
 
-/** 跑一段驾驶场景，逐帧收集相机读数 */
+/** 跑一段驾驶场景，逐帧收集相机读数。用 feel.js 的**真实**出厂值驱动 */
 function flyCamera({ targetSpeed, steer = 1, frames = 300, jitter = 0, wheels = 600 }) {
-  const feelCfg = {
-    fovSpeed: 10, armDistSpeed: -0.9,
-    leadDeadDeg: 10, leadFullDeg: 20,
-    frameLagCancel: 0.72, frameXMax: 0.30,
-  };
+  const feelCfg = { ...feel };
   let s = createKartState();
   for (let i = 0; i < wheels; i++) s = stepKart(s, { forward: 1, turn: 0 }, 1 / 60, targetSpeed);
 
@@ -825,4 +822,32 @@ test('stepCamera：视野随速度张开、臂长随速度收近', () => {
   assert.equal(slow.armDist, 7, '静止时臂长就是基准');
   assert.ok(fast.fov > slow.fov, '速度高视野应该更广');
   assert.ok(fast.armDist < slow.armDist, '速度高臂长应该收近（不是拉远）');
+});
+
+
+// ---------------------------------------------------------------------------
+//  回归 4：横向偏移的"速度"（用户实测：这个速度太快会头晕）
+//
+//  之前把它抄成了参考的 FRAME_ANG_RATE=0.85 rad/s —— 参考**故意**要那么快
+//  （原文：「1.2 能在半秒内摆完整个构图，快到让一次漂移抓地读作一个事件」）。
+//  我们没有漂移，那个速度就只剩晕。实测 8 m/s 满舵：构图 49°/s、
+//  车每秒滑过 0.84 NDC（= 42% 屏宽）。这条把上限定住。
+// ---------------------------------------------------------------------------
+test('回归：横向偏移速度被限住（太快会头晕）', () => {
+  const rows = flyCamera({ targetSpeed: 8, frames: 300 });
+  let maxV = 0;
+  let prev = rows[0].frameX;
+  for (const o of rows) {
+    maxV = Math.max(maxV, Math.abs(o.frameX - prev) * 60);   // 每帧位移 × 60 = NDC/秒
+    prev = o.frameX;
+  }
+  assert.ok(maxV < 0.35,
+    `8 m/s 满舵的横向偏移速度是 ${maxV.toFixed(2)} NDC/秒，太快（旧值 0.84，全屏宽 = 2 NDC）`);
+});
+
+test('回归：出厂值本身就该"慢"——frameAngRate 必须远小于参考的 0.85', () => {
+  assert.ok(FEEL_DEFAULTS.frameAngRate < 0.45,
+    `frameAngRate=${FEEL_DEFAULTS.frameAngRate}，参考是 0.85（那是为漂移设计的快）`);
+  assert.ok(FEEL_DEFAULTS.cornerTau >= 0.25,
+    'cornerTau 太小会让构图猛地淡入');
 });

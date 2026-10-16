@@ -619,12 +619,16 @@ export function stepCamera(cam, ctx) {
   const armDist = armDistFor(baseDist, feel.armDistSpeed, speed, maxSpeed);
 
   // ⑤ 构图：死区挡掉小修正 → 平滑 → 变化率上限
+  //    ★ frameAngRate / cornerTau 从 feel 读（可在控制台现场调）：
+  //      它们直接决定"横向偏移有多快"，是用户实测报告的头晕来源。
+  const angRate = feel.frameAngRate ?? t.frameAngRate;
+  const cornerTau = feel.cornerTau ?? t.cornerTau;
   const leadTarget = leadWeight(Math.abs(lag),
     feel.leadDeadDeg * DEG, feel.leadFullDeg * DEG);
-  const lead = damp(cam.lead, leadTarget, t.cornerTau, dt);
+  const lead = damp(cam.lead, leadTarget, cornerTau, dt);
   const wantComp = -feel.frameLagCancel * lag * lead;
-  const compAng = cam.compAng + Math.max(-t.frameAngRate * dt,
-    Math.min(t.frameAngRate * dt, wantComp - cam.compAng));
+  const compAng = cam.compAng + Math.max(-angRate * dt,
+    Math.min(angRate * dt, wantComp - cam.compAng));
 
   // ⑥ 屏幕位置（构图解算的输入）
   const tanV = Math.tan((fov * Math.PI) / 360);

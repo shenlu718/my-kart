@@ -22,6 +22,9 @@ export const DEFAULTS = {
   leadFullDeg: 20,      // 滞后大于它，构图满额
   frameLagCancel: 0.72, // 抵消多少比例的方位角滞后
   frameXMax: 0.30,      // 横向构图硬上限（NDC）
+  // ↓ 这两个直接决定「横向偏移有多快」——用户实测：太快会头晕
+  frameAngRate: 0.30,   // 构图角变化率上限（rad/s）。参考是 0.85（它要"漂移抓地读作事件"），我们只要不晕
+  cornerTau: 0.35,      // 过弯估计的平滑时间常数（秒）。越大，构图越是慢慢淡入
 };
 
 /**
@@ -40,6 +43,8 @@ export const PUNCHY = {
   leadFullDeg: 22,
   frameLagCancel: 0.72,
   frameXMax: 0.30,
+  frameAngRate: 0.45,   // "猛"允许快一点，但也远慢于参考的 0.85
+  cornerTau: 0.25,
 };
 
 /** 当前生效的参数（可变）。main.js 每帧读它，所以改了下一帧就生效。 */
