@@ -8,7 +8,7 @@
 // ============================================================================
 
 import * as THREE from '../vendor/three/three.module.js';
-import { createKartState, stepKart, camHeightOf } from './kart-math.js';
+import { createKartState, stepKart, camHeightOf, approachFactor } from './kart-math.js';
 import { createKeyState } from './keys.js';
 
 
@@ -28,9 +28,25 @@ import { createKeyState } from './keys.js';
 //    右上角实时显示当前值。调到满意后把数字告诉我，我固化成默认。
 // ---------------------------------------------------------------------------
 const cam = {
-  distance: 6.8,  // 相机在车后多远
-  angleDeg: 27,   // 俯角（度）
+  distance: 7.0,  // 相机在车后多远（用户实测调出来的值）
+  angleDeg: 26,   // 俯角（度，同上）
 };
+
+/**
+ * 相机追赶车的速度。越大跟得越紧（越接近"硬贴"），越小越飘。
+ * 7 大约等于 0.14 秒追上剩余路程的一半。
+ */
+const CAM_FOLLOW_RATE = 7;
+
+/**
+ * 速度倍率：乘在 kart-math 的 MOVE_SPEED（4 米/秒）之上。
+ *
+ * 为什么用倍率，而不是直接改 MOVE_SPEED？
+ * 因为 MOVE_SPEED 是底层的基准常量、测试也引用着它，改它会破坏测试的意义。
+ * 倍率留在 main.js 这层（纯表现层），随便调、不影响任何测试。
+ * 「底层定基准、上层调口味」是很常见的分层方式。
+ */
+let speedScale = 1.5;
 
 // （俯角 → 高度的换算 camHeightOf 已搬到 kart-math.js，
 //   那样才能被自动化测试覆盖——它有个极易搞错的弧度/角度陷阱。）
@@ -160,14 +176,15 @@ document.body.appendChild(camInfo);
 
 function showCamInfo() {
   camInfo.textContent =
-    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°\n` +
-    `[ ] 调距离      - = 调俯角`;
+    `相机距离 ${cam.distance.toFixed(1)}    俯角 ${cam.angleDeg}°    速度 ×${speedScale.toFixed(1)}\n` +
+    `[ ] 调距离      - = 调俯角      , . 调速度`;
 }
 showCamInfo();
 
-// 每按一次变化多少。想调得更细就把这两个数改小。
+// 每按一次变化多少。想调得更细就把这几个数改小。
 const CAM_STEP_DISTANCE = 0.2;
 const CAM_STEP_ANGLE = 1;
+const SPEED_STEP = 0.1;
 
 window.addEventListener('keydown', (e) => {
   let changed = false;
@@ -177,6 +194,9 @@ window.addEventListener('keydown', (e) => {
   // - 和 = 调俯角：看得更远 / 看得更下
   if (e.key === '-') { cam.angleDeg = Math.max(5,  cam.angleDeg - CAM_STEP_ANGLE); changed = true; }
   if (e.key === '=' || e.key === '+') { cam.angleDeg = Math.min(60, cam.angleDeg + CAM_STEP_ANGLE); changed = true; }
+  // , 和 . 调速度倍率：慢 / 快
+  if (e.key === ',') { speedScale = Math.max(0.3, +(speedScale - SPEED_STEP).toFixed(1)); changed = true; }
+  if (e.key === '.') { speedScale = Math.min(5,   +(speedScale + SPEED_STEP).toFixed(1)); changed = true; }
   if (changed) showCamInfo();
 });
 
@@ -184,6 +204,21 @@ window.addEventListener('keydown', (e) => {
 // ---------- 8. 车的状态 + 计时器 ----------
 let state = createKartState();
 const clock = new THREE.Clock(); // 用来量"距上一帧过了多少秒"
+
+
+// ---------- 8b. 相机跟随用的暂存对象 ----------
+// 复用一个 Vector3，不在帧循环里反复 new（每帧都分配新对象会拖慢性能，
+// 这是游戏代码里最常见的性能坑之一）
+const camTarget = new THREE.Vector3();
+
+// 先把相机瞬移到它该在的位置。
+// 否则第一帧会从原点 (0,0,0) 一路"飞"过来，开场就是一段莫名其妙的运镜。
+camTarget.set(
+  Math.sin(state.yaw) * cam.distance,
+  camHeightOf(cam),
+  Math.cos(state.yaw) * cam.distance
+);
+camera.position.copy(camTarget);
 
 
 // ---------- 9. 每帧循环 ----------
@@ -194,8 +229,9 @@ function frame() {
   // 读键盘 → 变成"意图"
   // 上和下写成相减：同时按住时 1 - 1 = 0 自然抵消，不用额外判断
   const input = {
-    forward: (keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
-           - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0),
+    // 乘上速度倍率：这样调速度不用动 kart-math 里的基准常量
+    forward: ((keys.isHeld('ArrowUp') || keys.isHeld('w') ? 1 : 0)
+           - (keys.isHeld('ArrowDown') || keys.isHeld('s') ? 1 : 0)) * speedScale,
     turn: (keys.isHeld('ArrowLeft') || keys.isHeld('a') ? 1 : 0)
         - (keys.isHeld('ArrowRight') || keys.isHeld('d') ? 1 : 0),
   };
@@ -208,13 +244,20 @@ function frame() {
   kart.position.z = state.z;
   kart.rotation.y = state.yaw;
 
-  // 相机跟在车后上方
+  // 相机该在的位置：车后上方
   // 车头朝 (-sin, 0, -cos)，所以"车后"是 (+sin, 0, +cos)
-  camera.position.set(
+  camTarget.set(
     state.x + Math.sin(state.yaw) * cam.distance,
     camHeightOf(cam),
     state.z + Math.cos(state.yaw) * cam.distance
   );
+
+  // 平滑地逼近那个位置，而不是每帧硬贴上去。
+  // 相机会稍微"落后"一点：加速时被甩开、停下时慢慢跟上——
+  // 这一点点滞后就是速度感的来源；硬跟会让画面僵硬死板。
+  // 用 approachFactor 而非固定比例，保证不同帧率下跟随速度一致。
+  camera.position.lerp(camTarget, approachFactor(CAM_FOLLOW_RATE, dt));
+
   camera.lookAt(state.x, 0.3, state.z);
 
   renderer.render(scene, camera);

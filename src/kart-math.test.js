@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createKartState, stepKart, camHeightOf, MOVE_SPEED, TURN_SPEED } from './kart-math.js';
+import { createKartState, stepKart, camHeightOf, approachFactor, MOVE_SPEED, TURN_SPEED } from './kart-math.js';
 
 
 // ---------------------------------------------------------------------------
@@ -178,4 +178,38 @@ test('俯角变大：相机更高；距离变大：相机同比例更高', () =>
   const near = camHeightOf({ distance: 5, angleDeg: 30 });
   const far = camHeightOf({ distance: 10, angleDeg: 30 });
   assert.ok(Math.abs(far - near * 2) < 1e-9, '距离翻倍时高度应该也翻倍（角度不变）');
+});
+
+
+// ---------------------------------------------------------------------------
+//  测试 10：帧率无关的平滑逼近
+//
+//  相机平滑跟随靠它。这条测试钉住的是那个最容易犯的错：
+//  写成「每帧固定靠近 10%」——那样 60fps 的机器追得比 30fps 快一倍。
+//
+//  判定方式：跑同样长的 1 秒，30 帧和 60 帧的剩余距离必须一致，
+//  而且都精确等于 e^(-rate)（这是指数衰减的解析解）。
+// ---------------------------------------------------------------------------
+test('平滑逼近：30 帧和 60 帧跑完 1 秒，剩下的距离完全一样', () => {
+  const rate = 7;
+
+  let remainingAt60 = 1;
+  for (let i = 0; i < 60; i++) remainingAt60 *= 1 - approachFactor(rate, 1 / 60);
+
+  let remainingAt30 = 1;
+  for (let i = 0; i < 30; i++) remainingAt30 *= 1 - approachFactor(rate, 1 / 30);
+
+  assert.ok(Math.abs(remainingAt60 - remainingAt30) < 1e-9,
+    `60帧剩 ${remainingAt60}，30帧剩 ${remainingAt30}，应该一致`);
+
+  // 解析解：经过 t 秒后，剩余比例 = e^(-rate × t)
+  assert.ok(Math.abs(remainingAt60 - Math.exp(-rate)) < 1e-9,
+    `应该等于 e^(-7)，实际 ${remainingAt60}`);
+});
+
+test('平滑逼近：dt = 0 时纹丝不动，dt 很大时几乎贴到目标', () => {
+  assert.equal(approachFactor(7, 0), 0, '没经过时间就不该移动');
+  assert.ok(approachFactor(7, 10) > 0.99, '经过很久应该基本到位');
+  assert.ok(approachFactor(7, 0.016) > 0 && approachFactor(7, 0.016) < 0.2,
+    '一帧（16ms）的变化应该是很小的一步');
 });

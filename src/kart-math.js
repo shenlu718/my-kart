@@ -68,3 +68,28 @@ export function stepKart(state, input, dt) {
 export function camHeightOf(cam) {
   return cam.distance * Math.tan((cam.angleDeg * Math.PI) / 180);
 }
+
+
+/**
+ * 「每帧向目标靠近多少比例」——帧率无关的平滑逼近系数。
+ *
+ * 想让一个值平滑地追向目标，新手最容易写成：
+ *
+ *     value += (target - value) * 0.1      // ❌ 每帧固定 10%
+ *
+ * 这样 60fps 的电脑会追得比 30fps 快一倍，和之前踩过的坑同一类。
+ *
+ * 正确写法是把它变成时间的函数：
+ *
+ *     value += (target - value) * approachFactor(rate, dt)
+ *
+ * 这样无论拆成多少帧，经过同样长的时间，追上的程度完全一样
+ * （数学上它精确等于 1 - e^(-rate × 经过的秒数)）。
+ *
+ * @param {number} rate 追赶速度，越大追得越紧（7 大约是 0.14 秒追上一半）
+ * @param {number} dt   这一帧过了多少秒
+ * @returns {number} 这一帧应该靠近目标的比例，0~1
+ */
+export function approachFactor(rate, dt) {
+  return 1 - Math.exp(-rate * dt);
+}
