@@ -16,8 +16,8 @@
 
 /** 出厂默认值 —— 改这里的数就是改游戏的手感基线 */
 export const DEFAULTS = {
-  fovSpeed: 10,         // 静止→全速，垂直视野多开多少度
-  armDistSpeed: -0.9,   // 全速时臂长变化（米）。★ 负 = 相机收近 ★
+  fovSpeed: 13,         // 静止→全速，垂直视野多开多少度（原 10，用户实测"前后反差小"→加大）
+  armDistSpeed: -1.6,   // 全速时臂长变化（米）。★ 负 = 相机收近 ★（原 -0.9，同上加大）
   leadDeadDeg: 10,      // 构图死区：滞后小于它，画面完全不动
   leadFullDeg: 20,      // 滞后大于它，构图满额
   frameLagCancel: 0.72, // 抵消多少比例的方位角滞后
@@ -37,8 +37,8 @@ export const DEFAULTS = {
  * 所以"猛"= 视野大开 + 臂长收近（负）+ 相机更低。
  */
 export const PUNCHY = {
-  fovSpeed: 16,
-  armDistSpeed: -1.4,
+  fovSpeed: 18,
+  armDistSpeed: -2.2,
   leadDeadDeg: 14,
   leadFullDeg: 22,
   frameLagCancel: 0.72,
