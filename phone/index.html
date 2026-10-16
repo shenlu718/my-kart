@@ -51,6 +51,7 @@
     <span id="echo" style="margin-left:auto"></span>
     <button class="tiny" id="tilt-btn">体感：关</button>
     <button class="tiny" id="cal-btn">校准</button>
+    <button class="tiny" id="inv-btn">反向：关</button>
   </div>
 
   <div id="pad">
@@ -107,11 +108,14 @@ const SENSOR_STALE_MS = 600; // 传感器多久没数据就当作失效（切后
 const CAL_STABLE_MS = 160;   // 中位校准：姿势**稳定这么久**才取零
 
 let tiltOn = false;
+let invert = false;        // 反向：万一轴/符号反了，玩家自己一键翻过来，不用等我改代码
 let raw = null;            // 当前滚转角（度）
 let zero = null;           // 校准中位
 let sensorAt = 0;          // 最后一次收到传感器数据的时刻
 let candidate = null;      // 稳定判定用的候选零位
 let stableAt = 0;
+let lastBeta = null;       // 原始读数，显示出来供现场判断（我这台机器推不出真实姿势对应值）
+let lastGamma = null;
 
 /** 当前屏幕方向（各家浏览器报告方式不一致，交给 tilt.js 归一） */
 function currentScreenAngle() {
@@ -127,11 +131,13 @@ function currentScreenAngle() {
 function tiltTurn() {
   if (!tiltOn || raw === null || zero === null) return 0;
   if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
-  return steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, false);
+  return steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, invert);
 }
 
 function onOrientation(e) {
   if (!Number.isFinite(e.beta) || !Number.isFinite(e.gamma)) return;
+  lastBeta = e.beta;
+  lastGamma = e.gamma;
   const v = rollDegrees(e.beta, e.gamma, currentScreenAngle());
   if (v === null) { raw = null; zero = null; return; }   // 手机平放：给不出稳定滚转角
   const now = performance.now();
@@ -199,6 +205,12 @@ calBtn.addEventListener('click', () => {
   stateEl.textContent = '已重新校准';
 });
 
+document.getElementById('inv-btn').addEventListener('click', (ev) => {
+  invert = !invert;
+  ev.currentTarget.textContent = '反向：' + (invert ? '开' : '关');
+  ev.currentTarget.classList.toggle('on', invert);
+});
+
 // ---------------------------------------------------------------------------
 //  发送
 // ---------------------------------------------------------------------------
@@ -228,8 +240,14 @@ async function send() {
     stateEl.textContent = '连不上电脑（' + why + '）';
   }
   const t = tiltTurn();
+  // 体感开着时把**原始读数**也显示出来：beta/gamma/屏幕角度/滚转角。
+  // 原因：轴的对应关系（哪个轴才是"左右歪"）是设备事实，我在这台机器上推不出来，
+  // 只有你在手机上歪一下、把数字念给我，才能一次定位（而不是我再猜一轮）。
+  const fmt = (x) => (x === null || x === undefined ? '—' : Math.round(x));
   echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn.toFixed(2)}`
-    + (tiltOn ? `  倾角 ${raw === null ? '—' : Math.round(raw)}°` : '');
+    + (tiltOn
+      ? `  β${fmt(lastBeta)} γ${fmt(lastGamma)} 屏${currentScreenAngle()} 滚${fmt(raw)}`
+      : '');
 }
 
 // 按下 / 松开：用 Pointer Events，天然支持多点触控
