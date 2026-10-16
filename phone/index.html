@@ -86,9 +86,12 @@ let seq = 0;   // 包序号：让游戏侧能丢弃乱序/迟到的旧包（否�
 // ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
 const sending = !new URLSearchParams(location.search).has('nostream');
 
+let rttMs = null;
+
 async function send() {
   if (!sending) return;
   const input = padInput(pad);   // ← 唯一的事实来源，和测试跑同一份代码
+  const t0 = performance.now();
   try {
     const res = await fetch('/api/input', {
       method: 'POST',
@@ -96,8 +99,14 @@ async function send() {
       body: JSON.stringify({ ...input, seq: seq++ }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    // 往返耗时 = 这次 POST 从发出到拿到响应。**这是客观的延迟读数**：
+    // 换网络路径（校园网 / Tailscale / 手机热点）之后就看这个数 ——
+    // 它直接决定体感转向能不能用（体感对延迟极敏感）。
+    // 指数平滑一下，免得界面上数字乱跳。
+    const ms = performance.now() - t0;
+    rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    stateEl.textContent = '已连接 · v2';   // 版本号：用来一眼看出手机跑的是不是最新页面
+    stateEl.textContent = `已连接 · v3 · 往返 ${Math.round(rttMs)} ms`;
   } catch (e) {
     dot.classList.remove('on');
     stateEl.textContent = '连不上电脑（' + (e.message || e) + '）';
