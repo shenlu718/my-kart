@@ -422,3 +422,45 @@ export function ndcFromAngle(angleRad, tanHalf) {
   if (!(tanHalf > 0)) return 0;
   return Math.tan(angleRad) / tanHalf;
 }
+
+
+/**
+ * 横向加速度（米/秒²）—— 「过得多急」的客观量。
+ *
+ *      aLat = |车速 × 偏航率|
+ *
+ * 参考实现用它定义「是不是在过弯」：9.0 m/s² 算一个满弯。
+ * 它比「打了多少方向」更接近体感：同样打满舵，低速时转得慢、横向加速度小；
+ * 高速时一下就很大。
+ *
+ * @param {number} speed 车速（米/秒）
+ * @param {number} yawRate 偏航率（弧度/秒）
+ * @returns {number} 横向加速度（米/秒²，非负）
+ */
+export function lateralAccel(speed, yawRate) {
+  return Math.abs(speed * yawRate);
+}
+
+
+/**
+ * 构图的「启用程度」：0 = 画面完全不动，1 = 满额。
+ *
+ * 为什么需要死区：参考实现的构图是**连续**响应方位角滞后的 —— 只要打方向，
+ * 画面就跟着偏一点。于是直线行驶时每一次小修正都会让画面晃。
+ * 用户实测原话：「它不会每次左右转弯都会有镜头偏移的，
+ * 每次左右转弯都有偏移的话，玩起来头会很晕。」
+ *
+ * 所以这里按体感做一处**有意偏离**参考：只有真过弯（滞后超过 deadRad）
+ * 才动画面，并且用 smoothstep 平滑起步 —— 死区边界处不会跳一下。
+ *
+ * @param {number} lagRad 方位角滞后的大小（弧度，非负）
+ * @param {number} deadRad 死区：小于它完全不动
+ * @param {number} fullRad 满额：大于它给满
+ * @returns {number} 0~1
+ */
+export function leadWeight(lagRad, deadRad, fullRad) {
+  if (!(fullRad > deadRad)) return 0;
+  if (!(lagRad > deadRad)) return 0;
+  const t = Math.min(1, (lagRad - deadRad) / (fullRad - deadRad));
+  return t * t * (3 - 2 * t); // smoothstep
+}

@@ -14,7 +14,7 @@ import {
   createKartState, stepKart, nextSpeed,
   camHeightOf, approachFactor, followRateFor, damp, dampAngle,
   angularRateDegPerSec, screenFraction, snapToTile,
-  yawRateFor, fovForSpeed, ndcFromAngle,
+  yawRateFor, fovForSpeed, ndcFromAngle, leadWeight, lateralAccel,
   MAX_SPEED, REVERSE_SPEED, ACCEL,
   WHEELBASE, HALF_BASE, MAX_STEER,
 } from './kart-math.js';
@@ -612,4 +612,52 @@ test('视野随速度单调增大（这才是"看得见加速度"的来源）', 
   const a = fovForSpeed(60, 8, 3, 12);
   const b = fovForSpeed(60, 8, 9, 12);
   assert.ok(b > a, `速度高的视野应该更大：${b} vs ${a}`);
+});
+
+
+// ===========================================================================
+//  八、构图死区 —— 小转弯不该晃镜头
+//
+//  用户实测原话：「我玩卡丁车的时候，它不会每次左右转弯都会有镜头偏移的，
+//  每次左右转弯都有偏移的话，玩起来头会很晕。」
+//
+//  参考实现的构图是**连续**响应方位角滞后的（没有死区）：只要打方向，画面
+//  就跟着偏一点。直线行驶时每一次小修正都会让画面晃。所以这里按体感做一处
+//  **有意偏离**：只有真过弯（滞后超过死区）才动画面，并用 smoothstep 平滑起步。
+// ===========================================================================
+
+test('构图死区：滞后小于死区 → 完全不动（小修正不晃镜头）', () => {
+  assert.equal(leadWeight(0.05, 0.17, 0.35), 0);
+  assert.equal(leadWeight(0.17, 0.17, 0.35), 0, '刚好等于死区也不该动');
+});
+
+test('构图死区：滞后到满额值 → 满额（1），且不溢出', () => {
+  assert.equal(leadWeight(0.35, 0.17, 0.35), 1);
+  assert.equal(leadWeight(0.9, 0.17, 0.35), 1);
+});
+
+test('构图死区：过渡单调且平滑起步（死区边界不跳变）', () => {
+  const dead = 0.17, full = 0.35;
+  const a = leadWeight(0.20, dead, full);
+  const b = leadWeight(0.28, dead, full);
+  assert.ok(a > 0 && b > a && b < 1, `应该单调过渡：${a} → ${b}`);
+  assert.ok(leadWeight(0.171, dead, full) < 0.001, '死区边界应该平滑起步，不能跳');
+});
+
+test('构图死区：参数不合法时不炸', () => {
+  assert.equal(leadWeight(0.3, 0.35, 0.17), 0, 'full ≤ dead 时返回 0');
+  assert.equal(leadWeight(-0.3, 0.17, 0.35), 0, '负滞后当 0 处理');
+});
+
+
+// ===========================================================================
+//  九、横向加速度 —— 「过得多急」的客观量
+//
+//  参考用它定义「是不是在过弯」：9.0 m/s² 算满弯。
+// ===========================================================================
+
+test('横向加速度 = |车速 × 偏航率|', () => {
+  assert.equal(lateralAccel(8, 0.5), 4);
+  assert.equal(lateralAccel(-8, 0.5), 4, '倒车取绝对值');
+  assert.equal(lateralAccel(0, 3), 0, '停着就是 0');
 });

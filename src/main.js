@@ -11,7 +11,7 @@ import * as THREE from '../vendor/three/three.module.js';
 import {
   createKartState, stepKart, camHeightOf, damp, dampAngle,
   angularRateDegPerSec, screenFraction, snapToTile,
-  fovForSpeed, ndcFromAngle,
+  fovForSpeed, ndcFromAngle, leadWeight,
   MAX_SPEED, MAX_STEER,
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
@@ -85,6 +85,16 @@ const CAM_FRAME_LAG_CANCEL = 0.72;
 const CAM_FRAME_ANG_RATE = 0.85;
 /** 横向构图硬上限（NDC）。超过约 1/3 个半屏，主体就不像主体了（参考值 0.30） */
 const CAM_FRAME_X_MAX = 0.30;
+/**
+ * 构图死区（度）：方位角滞后小于它 → **画面完全不动**。
+ *
+ * 用户实测原话：「它不会每次左右转弯都会有镜头偏移的，每次左右转弯都有偏移的话，
+ * 玩起来头会很晕。」参考实现的构图是连续响应的（没有死区），这一条是我们
+ * 按体感**有意加的偏离**：只有真过弯才动画面，直线上的小修正不晃镜头。
+ */
+const CAM_LEAD_DEAD_DEG = 10;
+/** 滞后超过它 → 构图满额；中间用 smoothstep 平滑过渡（死区边界不跳） */
+const CAM_LEAD_FULL_DEG = 20;
 /** 车压在画面下半，把上半屏让给前方的路（参考值 -0.19） */
 const CAM_FRAME_Y = -0.19;
 /** 速度越快再压低一点，进一步把视线推向前方 */
@@ -421,6 +431,7 @@ const metrics = {
   framing: 0,      // 车占屏比例（0~1）
   fov: 0,          // 当前垂直视野（度）—— 随速度张开
   leadDeg: 0,      // 镜头领入角（度）—— 过弯时镜头往弯内转了多少
+  lead: 0,         // 构图启用程度（0~1）—— 死区把小的修正挡在外面
   frameX: 0,       // 车在屏幕上的横向位置（NDC，0 = 正中；负 = 偏左）
 };
 
@@ -445,7 +456,8 @@ function renderPanel() {
     `车速     ${metrics.speed.toFixed(1).padStart(5)} 米/秒   ${(metrics.speed * 3.6).toFixed(0).padStart(4)} km/h\n` +
     `视野     ${metrics.fov.toFixed(1).padStart(5)} °      （速度感来源）\n` +
     `相机摆动 ${metrics.swing.toFixed(0).padStart(5)} °/s   峰值 ${metrics.swingPeak.toFixed(0).padStart(5)} °/s\n` +
-    `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °     车在画面 ${metrics.frameX >= 0 ? '+' : ''}${metrics.frameX.toFixed(2)}\n` +
+    `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °   启用 ${(metrics.lead * 100).toFixed(0).padStart(3)} %\n` +
+    `车在画面 ${(metrics.frameX >= 0 ? '+' : '') + metrics.frameX.toFixed(2)}      （0=正中 负=偏左）\n` +
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
@@ -636,7 +648,10 @@ function frame() {
   //    （右弯时方位角拖在车头左侧 → bearingLag>0 → 构图角为负 → 车偏左，
   //      右侧弯内的路就看得见了 —— 这就是"驾驶视角"。）
   const bearingLag = Math.atan2(Math.sin(camYaw - state.yaw), Math.cos(camYaw - state.yaw));
-  const wantComp = -CAM_FRAME_LAG_CANCEL * bearingLag;
+  // 死区：只有真过弯才动画面（小修正不晃镜头）—— 按用户体感加的一层
+  const leadW = leadWeight(Math.abs(bearingLag),
+    (CAM_LEAD_DEAD_DEG * Math.PI) / 180, (CAM_LEAD_FULL_DEG * Math.PI) / 180);
+  const wantComp = -CAM_FRAME_LAG_CANCEL * bearingLag * leadW;
   compAng += Math.max(-CAM_FRAME_ANG_RATE * dt,
              Math.min(CAM_FRAME_ANG_RATE * dt, wantComp - compAng));
 
@@ -670,8 +685,9 @@ function frame() {
   kartPoint.set(state.x, KART_CENTER_Y, state.z);
   metrics.framing = screenFraction(KART_REF_HEIGHT, camera.position.distanceTo(kartPoint), camera.fov);
 
-  // ③ 构图读数：镜头领入多少度、车落在画面哪个横向位置
+  // ③ 构图读数：镜头领入多少度、死区启用多少、车落在画面哪里
   metrics.leadDeg = (compAng * 180) / Math.PI;
+  metrics.lead = leadW;
   metrics.frameX = frameX;
 
   // ④ 车速 / 视野 / 摆动读数
