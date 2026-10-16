@@ -197,6 +197,28 @@ function openBrowser(url) {
 }
 
 
+/** 打印一遍手机手柄的可用地址（地址没变就不重复打印） */
+let lastLanKey = '';
+function printLanAddresses(force = false) {
+  const lan = lanAddresses();
+  const key = lan.map((e) => e.address).join(',');
+  if (!force && key === lastLanKey) return;
+  lastLanKey = key;
+  if (!lan.length) return;
+  console.log('');
+  console.log('  📱 手机手柄（手机不用装任何东西，浏览器直接开）：');
+  for (const entry of lan) {
+    const mark = entry === lan[0] ? '→' : ' ';
+    console.log(`   ${mark} http://${entry.address}:${PORT}/phone/`);
+    console.log(`       ${entry.hint}   [网卡 ${entry.name}]`);
+  }
+  console.log('     ★ 校园网 / 公司网常有「设备互相隔离」，手机够不到电脑。');
+  console.log('       那种情况下【手机开热点 → 电脑连上它】，这里会自动出现新地址。');
+}
+
+// 网络一变（比如电脑连上了手机热点）就自动重印地址 —— 不用重启服务器
+setInterval(() => printLanAddresses(), 3000);
+
 // 绑 0.0.0.0 而不是 127.0.0.1：手机要能从局域网连进来 —— 这就是做手柄的前提。
 // 代价：同一个 WiFi 下的其他设备也能访问这个开发服务器（它只服务本项目的文件、
 // 没有隐私数据，但你应该知道这件事）。不想要就把这行改回 '127.0.0.1'。
@@ -205,18 +227,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('  ✓ 游戏已启动');
   console.log(`    地址：${url}`);
-  const lan = lanAddresses();
-  if (lan.length) {
-    console.log('');
-    console.log('  📱 手机手柄（手机不用装任何东西，浏览器直接开）：');
-    for (const entry of lan) {
-      const mark = entry === lan[0] ? '→' : ' ';
-      console.log(`   ${mark} http://${entry.address}:${PORT}/phone/`);
-      console.log(`       ${entry.hint}   [网卡 ${entry.name}]`);
-    }
-    console.log('     ★ 校园网 / 公司网常有「设备互相隔离」，手机够不到电脑。');
-    console.log('       那种情况下开电脑的「移动热点」，让手机连它，用上面带「本机热点」的地址。');
-  }
+  printLanAddresses(true);
   console.log('    浏览器应该已经自动打开了');
   console.log('');
   console.log('  停止服务：直接关掉这个窗口，或者按 Ctrl + C');
