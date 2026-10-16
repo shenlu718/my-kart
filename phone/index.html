@@ -97,19 +97,26 @@ async function send() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, seq: seq++ }),
+      // ★ 必须设超时：不设的话，"连不上"会一直挂到系统 TCP 超时（实测约 30 秒），
+      //   界面上就显示成"往返 29000ms" —— 把人误导成"延迟很高"，其实是根本不通。
+      //   1.5 秒还没响应，直接判失败，显示"连不上"。
+      signal: AbortSignal.timeout(1500),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     // 往返耗时 = 这次 POST 从发出到拿到响应。**这是客观的延迟读数**：
-    // 换网络路径（校园网 / Tailscale / 手机热点）之后就看这个数 ——
+    // 换网络路径（校园网 / Tailscale / 数据流量）之后就看这个数 ——
     // 它直接决定体感转向能不能用（体感对延迟极敏感）。
     // 指数平滑一下，免得界面上数字乱跳。
     const ms = performance.now() - t0;
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    stateEl.textContent = `已连接 · v3 · 往返 ${Math.round(rttMs)} ms`;
+    stateEl.textContent = `已连接 · v4 · 往返 ${Math.round(rttMs)} ms`;
   } catch (e) {
     dot.classList.remove('on');
-    stateEl.textContent = '连不上电脑（' + (e.message || e) + '）';
+    // 失败就把延迟读数清掉 —— 留着上一次的值会让人以为"还是通的，只是慢"
+    rttMs = null;
+    const why = e && e.name === 'TimeoutError' ? '超时（1.5 秒没响应）' : (e.message || e);
+    stateEl.textContent = '连不上电脑（' + why + '）';
   }
   echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn}`;
 }
