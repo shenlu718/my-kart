@@ -464,3 +464,76 @@ export function leadWeight(lagRad, deadRad, fullRad) {
   const t = Math.min(1, (lagRad - deadRad) / (fullRad - deadRad));
   return t * t * (3 - 2 * t); // smoothstep
 }
+
+
+// ---------------------------------------------------------------------------
+//  舒适边界（照参考 Camera.ts）
+//
+//  参考文件顶部把这套相机的全部常量分成四组，其中第一组就是「方位角」，
+//  并写明它的两条边界**就是舒适性的全部**：
+//    「it may never fall more than MAX_LAG behind the chassis,
+//      and it may never move faster than MAX_ARM_RATE.
+//      Those two bounds are the whole of the comfort story.」
+//  下面两个函数就是那两条边界，都是纯函数、都能测。
+// ---------------------------------------------------------------------------
+
+/**
+ * 环形角度的「滞后上限」：让 cur 追 target，但**最多只落后 maxLag**。
+ *
+ * 为什么需要：滞后不够会看不到前方（镜头被甩到车侧），滞后过多又看不出
+ * 镜头在摆。参考给的是 26°，原文说这是「决定玩家能不能看到自己去哪」的数。
+ *
+ * ★ 必须走最短弧 —— 和 dampAngle 同一个坑。
+ *
+ * @param {number} cur 当前角度（弧度）
+ * @param {number} target 目标角度（弧度）
+ * @param {number} maxLag 允许的最大滞后（弧度，非负）
+ * @returns {number} 钳制后的角度
+ */
+export function clampLagAngle(cur, target, maxLag) {
+  const lag = Math.atan2(Math.sin(cur - target), Math.cos(cur - target));
+  if (Math.abs(lag) <= maxLag) return cur;
+  return target + Math.sign(lag) * maxLag;
+}
+
+
+/**
+ * 环形角度的「单帧位移上限」：从 prev 到 cur，单帧最多转 maxStep。
+ *
+ * 为什么需要：参考原话 —— 「2.7 rad/s 是 155°/s，车的偏航率只有打转时才会超过，
+ * 而那正是它存在的理由：被撞飞的车每秒钟转二三百度，画面没有理由跟着复现。」
+ * 平时它不生效，是一道兜底而不是一个机制。
+ *
+ * ★ 同样走最短弧。
+ *
+ * @param {number} prev 上一帧的角度（弧度）
+ * @param {number} cur 这一帧想去的角度（弧度）
+ * @param {number} maxStep 单帧允许的最大位移（弧度）
+ * @returns {number} 钳制后的角度
+ */
+export function capStepAngle(prev, cur, maxStep) {
+  const step = Math.atan2(Math.sin(cur - prev), Math.cos(cur - prev));
+  if (Math.abs(step) <= maxStep) return cur;
+  return prev + Math.sign(step) * maxStep;
+}
+
+
+/**
+ * 臂长随速度增长 —— 加速时镜头往后拉，这是「速度感」的另一半。
+ *
+ * 用户实测原话：「开车时（加速/刹车）镜头没有随速度拉远拉近。」
+ * 参考里臂长会随速度、加力、刹车、漂移一起动（`ARM_DIST_SPEED`），
+ * 而且刻意做得很小 —— 因为臂长和视野是一对：拉长臂长会把主体缩小，
+ * 视野张开负责「世界扑面而来」。两个一起动才有真实的速度感。
+ *
+ * @param {number} baseDist 静止时的臂长（米）
+ * @param {number} perSpeed 满速时额外拉远多少（米）
+ * @param {number} speed 当前车速（米/秒）
+ * @param {number} maxSpeed 满速（米/秒）
+ * @returns {number} 当前该用的臂长（米）
+ */
+export function armDistFor(baseDist, perSpeed, speed, maxSpeed = MAX_SPEED) {
+  if (!(maxSpeed > 0)) return baseDist;
+  const t = Math.min(1, Math.abs(speed) / maxSpeed);
+  return baseDist + perSpeed * t;
+}

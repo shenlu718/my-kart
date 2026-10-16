@@ -15,6 +15,7 @@ import {
   camHeightOf, approachFactor, followRateFor, damp, dampAngle,
   angularRateDegPerSec, screenFraction, snapToTile,
   yawRateFor, fovForSpeed, ndcFromAngle, leadWeight, lateralAccel,
+  clampLagAngle, capStepAngle, armDistFor,
   MAX_SPEED, REVERSE_SPEED, ACCEL,
   WHEELBASE, HALF_BASE, MAX_STEER,
 } from './kart-math.js';
@@ -660,4 +661,54 @@ test('横向加速度 = |车速 × 偏航率|', () => {
   assert.equal(lateralAccel(8, 0.5), 4);
   assert.equal(lateralAccel(-8, 0.5), 4, '倒车取绝对值');
   assert.equal(lateralAccel(0, 3), 0, '停着就是 0');
+});
+
+
+// ===========================================================================
+//  十、舒适边界（照参考 Camera.ts 的 MAX_LAG / MAX_ARM_RATE）
+//
+//  用户质问：「参考别人的资料只参考一部分，看到了问题不落地，这个是很低级的错误吧。」
+//  对的。参考文件顶部写明：「方位角最多落后 MAX_LAG，且摆动速率不超过
+//  MAX_ARM_RATE —— 这两条就是舒适性的全部。」我们之前只搬了构图机制，漏了这两条。
+// ===========================================================================
+
+test('滞后上限：没超就原样，超了就钳在 MAX_LAG', () => {
+  const maxLag = 0.455;
+  assert.equal(clampLagAngle(0.2, 0, maxLag), 0.2);
+  const c = clampLagAngle(2.0, 0, maxLag);
+  const lag = Math.atan2(Math.sin(c - 0), Math.cos(c - 0));
+  assert.ok(Math.abs(lag - maxLag) < 1e-9, `应该钳到 ${maxLag}，实际 ${lag}`);
+});
+
+test('滞后上限：跨 ±180° 时按最短弧判断（179° 只落后 2°，不该被当成 358°）', () => {
+  const from = (179 * Math.PI) / 180;
+  const target = (-179 * Math.PI) / 180;
+  // 最短弧：实际只差 2°(0.035 rad) → 在 5° 的上限内，不该被钳
+  assert.equal(clampLagAngle(from, target, 0.0873), from, '只差 2°，不该被钳');
+  // 上限收到 0.5° 时才会钳，且方向是"跨过 ±180 往负方向"（不是绕 358°）
+  const c = clampLagAngle(from, target, 0.00873);
+  const lag = Math.atan2(Math.sin(c - target), Math.cos(c - target));
+  assert.ok(Math.abs(Math.abs(lag) - 0.00873) < 1e-9, `应该钳到 0.5°，实际 ${lag}`);
+  assert.ok(lag < 0, `最短弧的方向是负，实际 ${lag}`);
+});
+
+test('摆动速率上限：单帧转过的角度不超过 maxRate×dt', () => {
+  const maxStep = 2.0 / 60;
+  assert.equal(capStepAngle(0, 0.01, maxStep), 0.01);
+  const c = capStepAngle(0, 1.0, maxStep);
+  assert.ok(Math.abs(c - maxStep) < 1e-9, `应该钳到 ${maxStep}，实际 ${c}`);
+});
+
+test('摆动速率上限：跨 ±180° 也走最短弧', () => {
+  const prev = (179 * Math.PI) / 180;
+  const cur = (-179 * Math.PI) / 180;
+  const c = capStepAngle(prev, cur, 0.05);
+  const step = Math.atan2(Math.sin(c - prev), Math.cos(c - prev));
+  assert.ok(Math.abs(step) <= 0.05 + 1e-9, `单帧位移该在 0.05 内，实际 ${step}`);
+});
+
+test('臂长随速度：静止是基准，满速加上 perSpeed，且不溢出', () => {
+  assert.equal(armDistFor(7, 1.2, 0, 12), 7);
+  assert.equal(armDistFor(7, 1.2, 12, 12), 8.2);
+  assert.equal(armDistFor(7, 1.2, 24, 12), 8.2, '超过满速不该继续拉远');
 });
