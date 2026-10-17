@@ -240,11 +240,35 @@ if (existsSync(CERT) && existsSync(KEY)) {
 }
 
 
+/**
+ * 打开游戏页面。
+ *
+ * ★ 用户诉求：「网页一堆地址栏、广告、提示，太繁琐」。
+ *   成本最低的一步：用 Chrome / Edge 的**应用窗口**（--app=）打开 ——
+ *   没有地址栏、没有书签栏、没有标签页，看起来就是一个独立软件。
+ *   找不到这两个浏览器再退回系统默认（行为和以前一样）。
+ *   这是桌面端对应的做法；手机端对应 PWA（phone\manifest.json）。
+ */
+const APP_WINDOW_BROWSERS = [
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+];
+
 /** 用系统默认浏览器打开网址 */
 function openBrowser(url) {
-  if (process.platform === 'win32') exec(`start "" ${url}`);
-  else if (process.platform === 'darwin') exec(`open ${url}`);
-  else exec(`xdg-open ${url}`);
+  if (process.platform === 'win32') {
+    const exe = APP_WINDOW_BROWSERS.find((p) => existsSync(p));
+    if (exe) {
+      exec(`"${exe}" --app=${url} --window-size=1280,800`);
+      return;
+    }
+    exec(`start "" ${url}`);
+    return;
+  }
+  if (process.platform === 'darwin') { exec(`open ${url}`); return; }
+  exec(`xdg-open ${url}`);
 }
 
 

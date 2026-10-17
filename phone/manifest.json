@@ -1,0 +1,14 @@
+{
+  "name": "my-kart 手柄",
+  "short_name": "kart 手柄",
+  "description": "手机当体感手柄，电脑当显示器",
+  "start_url": "/phone/",
+  "scope": "/phone/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#f3f5f7",
+  "theme_color": "#f3f5f7",
+  "icons": [
+    { "src": "/phone/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

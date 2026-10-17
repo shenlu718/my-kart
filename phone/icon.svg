@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <!-- 手柄图标：圆角浅底 + 左右方向键 + 中间刻度，和手机页的视觉语言一致 -->
+  <rect width="192" height="192" rx="42" fill="#f3f5f7"/>
+  <rect x="26" y="64" width="56" height="56" rx="28" fill="#e0e6ed" stroke="#d6dee7" stroke-width="2"/>
+  <rect x="110" y="64" width="56" height="56" rx="28" fill="#e0e6ed" stroke="#d6dee7" stroke-width="2"/>
+  <path d="M54 82 L38 92 L54 102 Z" fill="#46566b"/>
+  <path d="M138 82 L154 92 L138 102 Z" fill="#46566b"/>
+  <rect x="86" y="72" width="20" height="40" rx="10" fill="#3b4c62"/>
+  <rect x="93" y="60" width="6" height="24" rx="3" fill="#748fa9"/>
+</svg>

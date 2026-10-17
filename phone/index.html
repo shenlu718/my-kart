@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#f3f5f7">
+<!-- PWA：手机「添加到主屏幕」后以 standalone 启动 —— 没有地址栏、没有标签页，
+     看起来就是一个 App（调研结论：这是 iOS/安卓上都成立、零依赖的"去浏览器化"第一步） -->
+<link rel="manifest" href="/phone/manifest.json">
+<link rel="icon" href="/phone/icon.svg" type="image/svg+xml">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- iOS 的添加到主屏幕仍读这几个老 meta -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="kart 手柄">
 <title>my-kart 手柄</title>
 <style>
   /* ==========================================================================
