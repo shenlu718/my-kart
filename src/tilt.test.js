@@ -98,6 +98,31 @@ test('转向：非法 range 不会炸（除零）', () => {
   assert.equal(steerFromTilt(NaN, 25), 0);
 });
 
+// ---------------------------------------------------------------------------
+//  ★ 灵敏度曲线：小角度要温和（用户实测：「没有明显的大角度倾斜，它竟然大幅向右转」）
+//
+//  原来是**线性**映射：死区 2° + 满舵 32° 时，倾 10° 就已经给出 0.267 的舵量
+//  （折算成前轮 tan 是满舵的 24%），而且死区边缘的斜率从 0 突跳到 1/30 每度。
+//  幂函数 t^expo 同时治两件事：小角度压下去（10° → 约 7%），死区边缘斜率从 0 开始。
+//  调研给的配方：expo 2.0；范围保持 32°（满舵角要能在正常握持范围内打到）。
+// ---------------------------------------------------------------------------
+test('★ 曲线：expo=2 时 10° 只给约 7% 舵量，满舵角仍能给满', () => {
+  const dz = STEER_DEADZONE_DEG;
+  const linear = steerFromTilt(10, 32, false, 1);
+  const curved = steerFromTilt(10, 32, false, 2);
+  assert.ok(Math.abs(linear - (10 - dz) / (32 - dz)) < 1e-9, 'expo=1 必须退化成原来的线性');
+  assert.ok(Math.abs(curved - Math.pow((10 - dz) / (32 - dz), 2)) < 1e-9);
+  assert.ok(curved < linear / 3, `小角度要明显更温和：${curved.toFixed(3)} vs ${linear.toFixed(3)}`);
+  assert.equal(steerFromTilt(32, 32, false, 2), 1, '到满舵角仍要给满');
+  assert.equal(steerFromTilt(90, 32, false, 2), 1, '超过也不溢出');
+});
+
+test('曲线：左右对称、invert 仍然只翻符号、默认 expo 不是线性', () => {
+  assert.ok(Math.abs(steerFromTilt(15, 32, false, 2) + steerFromTilt(-15, 32, false, 2)) < 1e-9);
+  assert.ok(Math.abs(steerFromTilt(15, 32, true, 2) + steerFromTilt(15, 32, false, 2)) < 1e-9);
+  assert.ok(steerFromTilt(15, 32) < steerFromTilt(15, 32, false, 1), '默认曲线必须比线性温和');
+});
+
 test('FLAT_THRESHOLD 是个合理的小数（守卫不能太严，否则一拿起来就 null）', () => {
   assert.ok(FLAT_THRESHOLD > 0 && FLAT_THRESHOLD < 0.5, `阈值应远小于 1，实际 ${FLAT_THRESHOLD}`);
 });

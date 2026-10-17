@@ -84,23 +84,35 @@ export function angleDifference(angle, zero) {
 }
 
 /**
+ * 灵敏度曲线指数：1 = 线性；2 = 小角度明显更温和（调研配方 A）。
+ *
+ * ★ 为什么要有曲线（用户实测：「没有明显的大角度倾斜，它竟然大幅向右转」）：
+ *   线性映射下，死区 2° + 满舵 32° 时**倾 10° 就给 0.267 的舵量**（折算成前轮
+ *   tan 是满舵的 24%），而人的"想修一点方向"通常只有 3~8°。幂函数 t^expo
+ *   把小角度压下去（10° → 约 7%），同时死区边缘的斜率从 0 开始（线性是突跳）。
+ *   满舵角不变，所以"能打到满舵"这件事没被治没。
+ */
+export const STEER_EXPO = 2;
+
+/**
  * 滚转角 → 转向量 [-1, 1]。
  *
  * 死区后要**重新归一**：`(|deg| - 死区) / (range - 死区)`。
  * 不重新归一的话，因为死区吃掉了一段行程，你**永远打不到满舵**。
- * （参考项目里摇杆那段也用了同样的写法。）
+ * （参考项目里摇杆那段也用了同样的写法。）归一之后再过一条幂曲线。
  *
  * @param {number} deg 相对校准中位的滚转角（度）
- * @param {number} range 打到满舵需要多少度（玩家的"手感"旋钮，10~40 合理）
+ * @param {number} range 打到满舵需要多少度（玩家的"手感"旋钮，15~50 合理）
  * @param {boolean} [invert] 反一下方向（有人喜欢反着握）
+ * @param {number} [expo] 曲线指数，默认 STEER_EXPO；传 1 就是原来的线性
  * @returns {number} -1..1
  */
-export function steerFromTilt(deg, range, invert = false) {
+export function steerFromTilt(deg, range, invert = false, expo = STEER_EXPO) {
   if (!Number.isFinite(deg) || !Number.isFinite(range) || range <= STEER_DEADZONE_DEG) return 0;
   const mag = Math.abs(deg);
-  const v = mag <= STEER_DEADZONE_DEG
-    ? 0
-    : Math.sign(deg) * Math.min(1, (mag - STEER_DEADZONE_DEG) / (range - STEER_DEADZONE_DEG));
+  if (mag <= STEER_DEADZONE_DEG) return 0;
+  const t = Math.min(1, (mag - STEER_DEADZONE_DEG) / (range - STEER_DEADZONE_DEG));
+  const v = Math.sign(deg) * Math.pow(t, expo > 0 ? expo : 1);
   return invert ? -v : v;
 }
 
