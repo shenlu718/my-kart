@@ -27,6 +27,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { exec } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
+// 复用游戏侧同一份「新鲜度」判定：给新连上的游戏页推首帧时必须过一遍，
+// 否则手机锁屏后服务器留着的 forward:1 会让刚刷新的游戏页以为油门按着。
+import { freshSnapshotOrZero } from './src/remote-input.js';
 
 /** 项目根目录 = 本文件所在目录 */
 const ROOT = resolve(import.meta.dirname);
@@ -152,7 +155,10 @@ const server = http.createServer(async (req, res) => {
       };
       // 序号原样透传（游戏侧用它丢弃乱序/重复的包）。没带就不放这个字段。
       const seq = Number.isSafeInteger(msg && msg.seq) && msg.seq >= 0 ? msg.seq : undefined;
-      remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), seq, at: Date.now() };
+      // 会话 id 也透传：手机页刷新后 seq 会从 0 重来，游戏侧靠 sid 认出"这是新会话"，
+      // 否则新包会被当成过期包全部丢掉 —— 表现就是"刷新一次页面，手柄永久失灵"。
+      const sid = typeof (msg && msg.sid) === 'string' && msg.sid.length <= 64 ? msg.sid : undefined;
+      remoteInput = { forward: num(msg && msg.forward), turn: num(msg && msg.turn), seq, sid, at: Date.now() };
 
       if (!sawFirstInputPost) {
         sawFirstInputPost = true;
@@ -176,7 +182,9 @@ const server = http.createServer(async (req, res) => {
       'Cache-Control': 'no-store',
       'Connection': 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify(remoteInput)}\n\n`);   // 连上先给当前值
+    // ★ 首帧只给「还新鲜」的快照：手机锁屏/划掉后服务器会一直留着 forward:1，
+    //   直接推给刚刷新的游戏页会让车自己往前冲最多 800ms（复现：按住油门 → 飞行模式 → 刷新游戏页）。
+    res.write(`data: ${JSON.stringify(freshSnapshotOrZero(remoteInput, Date.now()))}\n\n`);
     sseClients.add(res);
     req.on('close', () => sseClients.delete(res));
     return;

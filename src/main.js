@@ -15,7 +15,7 @@ import {
 } from './kart-math.js';
 import { createKeyState } from './keys.js';
 import { feel, installFeel } from './feel.js';
-import { createRemoteInput, applyRemote, mergeInput, remoteIsFresh } from './remote-input.js';
+import { createRemoteInput, applyRemote, mergeInput, remoteIsFresh, shapeTurn } from './remote-input.js';
 
 // 把「速度感」调参口挂到 window.__feel —— 改完**下一帧**生效，不用改代码、不用刷新。
 // 用法：__feel.punchy() / __feel.reset() / __feel.set({fovSpeed: 14}) / __feel.show()
@@ -496,7 +496,8 @@ let camState = { camYaw: 0, compAng: 0, lead: 0, prevCamYaw: 0 };
  * 方向盘不该是 0/1 跳变的：真车打方向有个过程。它现在直接喂给 stepKart
  * 当前轮转角（顺带也抹掉了按键跳变），前轮的视觉摆角也用同一个值。
  */
-let turnSmooth = 0;
+let turnSmooth = 0;      // 最终转向（键盘平滑值 + 手机/体感），物理与视觉都用它
+let keyTurnSmooth = 0;   // **只有键盘那一路**的平滑值（平滑不该糊住体感）
 
 /** 摆动读数的平滑值，以及它的 1 秒峰值 */
 let swingSmooth = 0;
@@ -587,11 +588,17 @@ function frame() {
   remoteConnected = remoteIsFresh(remoteInput, nowMs);
   const merged = mergeInput({ forward: keyForward, turn: keyTurn }, remoteInput, nowMs);
   const forwardInput = merged.forward;
-  const turnRaw = merged.turn;
 
-  // 方向盘平滑：真车打方向有个过程，不是 0 → 满舵一帧跳变。
-  // 平滑后再进物理与视觉，所以反复按 A/D 不会让任何东西突变。
-  turnSmooth = damp(turnSmooth, turnRaw, TURN_SMOOTH_TAU, dt);
+  // 转向整形：**只有键盘那一路需要平滑**（0/1 跳变要有个过程），
+  // 手机/体感是连续信号，原样进合并 —— 否则体感会被糊出 140ms 相位滞后
+  // （倾斜手机 → 车轮 140ms 后才跟上）。这条曾是"改一处坏别处"的根源，
+  // 细节见 remote-input.js 里 shapeTurn 的注释。
+  const shaped = shapeTurn({
+    keyTurn, keyTurnSmoothPrev: keyTurnSmooth, remote: remoteInput, now: nowMs,
+    dt, tau: TURN_SMOOTH_TAU,
+  });
+  keyTurnSmooth = shaped.keyTurnSmooth;
+  turnSmooth = shaped.turn;
 
   const input = { forward: forwardInput, turn: turnSmooth };
 

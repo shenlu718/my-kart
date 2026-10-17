@@ -267,6 +267,11 @@ const boostBtn = document.getElementById('boost-btn');
 
 const pad = createPadState();
 let seq = 0;
+// ★ 每开一次页面换一个会话 id（sid）：手机页刷新后 seq 会从 0 重新数，
+//   游戏侧靠 sid 认出"这是新会话"，否则它会把新包当成过期包**全部丢掉** ——
+//   表现就是"手机刷新一次，手柄从此失灵"（要等 seq 追上旧值，约 60 秒）。
+const SID = (globalThis.crypto?.randomUUID?.()
+  ?? (String(Date.now()) + Math.random().toString(16).slice(2))).slice(0, 36);
 let rttMs = null;
 
 // 提示单独记时刻，3 秒内不被心跳覆盖（否则失败原因一闪就被擦掉 =「点了没反应」）
@@ -535,7 +540,7 @@ async function send() {
     const res = await fetch('/api/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...input, seq: seq++ }),
+      body: JSON.stringify({ ...input, seq: seq++, sid: SID }),
       signal: AbortSignal.timeout(1500),   // 必须设：见文件头注释
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
