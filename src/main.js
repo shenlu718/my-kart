@@ -11,6 +11,7 @@
 //   vendor/three/three.module.js。这样 addons（GLTFLoader 里写 `from 'three'`）
 //   才能和主程序共用**同一份** three —— 否则会各加载一份，instanceof 失效且不报错。
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   createKartState, stepKart, camHeightOf, damp,
   screenFraction, snapToTile, stepCamera,
@@ -45,6 +46,33 @@ fetch('/api/info')
     phoneUrlHttps = (info && info.phoneUrlHttps) || '';
   })
   .catch(() => { /* 没有服务器也正常（比如直接开文件），不影响游戏 */ });
+
+// ---------- 0c. GLB 管线验证（换真车的第一步）----------
+// 现在只是"能不能加载"的探针：加载 Kenney 的 CC0 低模车，数一下网格数与三角面，
+// 显示在指标面板上。**不动现有方块车**（换成它需要先把四轮接到现有的
+// {mesh, pivot} 接口上，那是下一步，不能一次做两件事）。
+// 顺便核对性能预算：调研给的参考是每车 4–8k 三角面。
+let glbStatus = '（未加载）';
+try {
+  new GLTFLoader().load(
+    'Models/vehicle-truck-red.glb',
+    (gltf) => {
+      let meshes = 0;
+      let tris = 0;
+      gltf.scene.traverse((o) => {
+        if (!o.isMesh) return;
+        meshes += 1;
+        const g = o.geometry;
+        tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
+      });
+      glbStatus = `✅ ${meshes} 网格 / ${Math.round(tris)} 三角面`;
+    },
+    undefined,
+    (err) => { glbStatus = '❌ 加载失败（看浏览器 console）'; console.warn('[GLB]', err); },
+  );
+} catch (e) {
+  glbStatus = '❌ ' + (e.message || e);
+}
 // ?nostream=1 时不连输入流 —— 给截图 / 排查用。
 // （一条永不结束的连接会让"等网络空闲"的渲染工具超时，实测过。）
 const wantRemoteStream = !new URLSearchParams(location.search).has('nostream');
@@ -464,6 +492,7 @@ function renderPanel() {
     `手柄     ${remoteConnected ? '✅ 手机已连接' : '—  未连接（手机打开下面那个地址）'}\n` +
     `手机地址 ${phoneUrl || '（检测中…）'}\n` +
     `体感用   ${phoneUrlHttps || '（检测中…）'}   ← 体感必须 https\n` +
+    `模型     ${glbStatus}\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
     `[ ] 距离  - = 俯角  , . 速度  P 收起面板\n` +
