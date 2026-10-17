@@ -102,7 +102,10 @@ try {
       for (const child of kart.children) child.visible = false;   // 方块车退场
       kart.add(root);
       wheels = newWheels;
-      wheelSpinSign = -1;
+      // ★ wheelSpinSign 保持 1（不反号）：实测「轮子滚动方向反了」，
+      //   把原来的 -1 改回来 —— 整体绕 Y 转 180° 并不改变轮子**局部** X 轴的旋转方向。
+      //   教训：这种符号别靠推导，真机看一眼最快。
+      wheelSpinSign = 1;
       glbStatus = `✅ ${meshes} 网格 / ${Math.round(tris)} 三角面 · 已换成真车`;
     },
     undefined,
