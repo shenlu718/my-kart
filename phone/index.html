@@ -40,6 +40,9 @@
     background: var(--bg); color: var(--ink);
     font: 14px/1.45 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
     user-select: none; -webkit-user-select: none; touch-action: none;
+    /* 长按不唤出浏览器菜单：长按油门是**正常玩法**（要一直按住），
+       不是误操作 —— iOS 的「拷贝/查询」气泡就是这么冒出来的 */
+    -webkit-touch-callout: none;
   }
   /* 刘海 / 圆角屏的安全区（参考项目也用）*/
   body {
@@ -576,6 +579,11 @@ async function send() {
   }
   echoEl.textContent = `油门 ${input.forward}　转向 ${input.turn.toFixed(2)}`;
 }
+
+// ★ 长按不能唤出浏览器菜单。油门是"按住不放"的键，长按是它的正常用法：
+//   安卓 Chrome 长按会弹「复制 / 搜索 / 打开链接」，压在按钮上挡住界面。
+//   CSS 的 -webkit-touch-callout 管 iOS，这一条 contextmenu 管安卓与桌面。
+document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // 按下 / 松开：Pointer Events，天然支持多点触控
 // ★ 松手听三个事件：pointerup / pointercancel / **lostpointercapture**（少了第三个，

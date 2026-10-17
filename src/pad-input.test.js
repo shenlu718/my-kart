@@ -124,3 +124,30 @@ test('合成：输出永远钳在 [-1,1]', () => {
   assert.equal(mergeTurn(0, -2), -1);
   assert.equal(mergeTurn(NaN, 0.5), 0.5, 'NaN 当 0 处理');
 });
+
+// ---------------------------------------------------------------------------
+//  长按不能唤出浏览器自己的菜单
+//
+//  用户实测反馈：「我长按油门的话还会出现这样低级的情况」——
+//  油门是**要一直按住**的键，长按是它的正常用法，而不是误操作。
+//  安卓/iOS 长按会弹「复制 / 搜索 / 打开链接」或放大镜，压在按钮上挡住界面。
+//  两条防线缺一不可：
+//    ① CSS `-webkit-touch-callout: none`（iOS 的长按菜单）
+//    ② 拦掉 `contextmenu`（安卓 Chrome 的长按菜单 / 桌面右键）
+// ---------------------------------------------------------------------------
+test('★ 手柄页必须禁掉长按弹出的浏览器菜单（长按油门是正常玩法）', () => {
+  const html = readFileSync(new URL('../phone/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('-webkit-touch-callout'),
+    'CSS 里要有 -webkit-touch-callout: none，否则 iOS 长按会弹菜单');
+  assert.ok(/addEventListener\(\s*['"]contextmenu['"]/.test(html),
+    '要监听并阻止 contextmenu，否则安卓长按会弹「复制/搜索」挡在按钮上');
+});
+
+test('★ 手柄页的主界面不能有 fixed 定位的提示行（它会长在按钮上）', () => {
+  const html = readFileSync(new URL('../phone/index.html', import.meta.url), 'utf8');
+  // 上一版把提示行 position:fixed 钉在屏幕底部，而中间栏的内容也会延伸到底部，
+  // 手机横屏被地址栏挤矮之后两者就叠在一起（用户截图里的"低级情况"）。
+  // 提示现在只允许出现在设置弹层里。
+  assert.ok(!/#hint\s*\{[^}]*position:\s*fixed/.test(html),
+    '提示不要再用 position:fixed 钉在屏幕底部 —— 矮屏下会叠在中间栏上');
+});
