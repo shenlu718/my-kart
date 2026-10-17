@@ -321,7 +321,18 @@ const BOOST_LABELS = ['关', '小', '中', '大'];
  *    这就是真机证据 —— 默认反过来。万一他的握持方向变了，
  *    主界面的「⇄ 左右互换」一点就回。
  */
-const settings = { range: 32, invert: true, boost: 0 };
+/**
+ * 手感三档（曲线指数）：指数越大，小角度越温和。
+ *   2.5 = 柔和（新手 / 握不稳）、2.0 = 标准（默认，比线性压约 4 倍）、1.4 = 灵敏（老手）
+ * 为什么做成三档而不是写死：手感是主观的，写死一次就只剩"我猜"。给玩家三档自己选。
+ */
+const CURVES = [
+  { name: '柔和', expo: 2.5 },
+  { name: '标准', expo: 2.0 },
+  { name: '灵敏', expo: 1.4 },
+];
+
+const settings = { range: 32, invert: true, boost: 0, curve: 1 };
 
 function loadSettings() {
   try {
@@ -329,6 +340,7 @@ function loadSettings() {
     if (Number.isFinite(s.range) && s.range >= 15 && s.range <= 50) settings.range = s.range;
     if (typeof s.invert === 'boolean') settings.invert = s.invert;
     if (Number.isInteger(s.boost) && s.boost >= 0 && s.boost < BOOST_STEPS.length) settings.boost = s.boost;
+    if (Number.isInteger(s.curve) && s.curve >= 0 && s.curve < CURVES.length) settings.curve = s.curve;
   } catch { /* 无痕模式：用默认值，别因此崩掉 */ }
 }
 function saveSettings() {
@@ -369,7 +381,8 @@ function tiltTurn() {
   if (!tiltOn || raw === null || zero === null) return 0;
   if (!isLandscape()) return 0;
   if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
-  const base = steerFromTilt(angleDifference(raw, zero), settings.range, settings.invert);
+  const base = steerFromTilt(angleDifference(raw, zero), settings.range, settings.invert,
+    CURVES[settings.curve].expo);
   const fresh = performance.now() - rateAt <= RATE_STALE_MS;
   const rate = fresh ? rateDps * (settings.invert ? -1 : 1) : 0;
   return combineSteer(base, rate, BOOST_STEPS[settings.boost]);
@@ -493,7 +506,23 @@ function syncControls() {
   boostBtn.classList.toggle('on', settings.boost > 0);
   rangeEl.value = String(settings.range);
   rangeValueEl.textContent = settings.range + '°';
+  curveBtn.textContent = '手感：' + CURVES[settings.curve].name;
+  curveBtn.classList.toggle('on', settings.curve !== 1);
 }
+
+// ---- 手感三档按钮：动态插进设置弹层（不必为了一个按钮改动 HTML 结构）----
+const curveBtn = document.createElement('button');
+curveBtn.className = 'pill';
+curveBtn.addEventListener('click', () => {
+  settings.curve = (settings.curve + 1) % CURVES.length;
+  saveSettings();
+  syncControls();
+});
+const curveRow = document.createElement('div');
+curveRow.className = 'row';
+curveRow.append(curveBtn);
+settingsDialog.querySelector('.dlg-head').after(curveRow);
+
 syncControls();
 
 setBtn.addEventListener('click', () => settingsDialog.showModal());
@@ -566,7 +595,7 @@ async function send() {
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
     if (performance.now() - noticeAt > 3000) {
-      stateEl.textContent = `已连接 · v9 · 往返 ${Math.round(rttMs)} ms`;
+      stateEl.textContent = `已连接 · v10 · 往返 ${Math.round(rttMs)} ms`;
     }
   } catch (e) {
     dot.classList.remove('on');
@@ -611,7 +640,12 @@ function releaseEverything() {
   send();
 }
 
-setInterval(send, 60);
+// ★ 发送节拍：60ms → 30ms。
+//   调研算过账：体感的延迟主项**不是网络**（局域网往返 ≤50ms），而是这里
+//   每 60ms 才发一帧 —— 均摊 30ms 的量化延迟，比网络本身还大。降到 30ms 后
+//   量化延迟减半；按键仍是事件驱动即时发送（不受节拍影响）。
+//   33 次/秒的 POST 在局域网上毫无压力（每条几百字节）。
+setInterval(send, 30);
 send();
 
 // 屏幕常亮：不然玩到一半手机息屏，操控直接断（锁在切后台时会被系统释放）
