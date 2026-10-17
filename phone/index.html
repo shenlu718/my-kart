@@ -2,45 +2,117 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<!-- 手机手柄：禁用缩放，铺满安全区，横屏最好用 -->
+<!-- 手机手柄：**横屏优先**。竖屏时显示「请把手机横过来」，不摆按钮。 -->
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0b1020">
 <title>my-kart 手柄</title>
 <style>
+  /* ★ 2026-10 重构：原来是「左右各半屏」的两列按钮，竖屏也能显示 ——
+     但用户的实测结论是「竖屏一点也不合手」。原因不只是习惯：
+     ① 竖屏时手指要跨过整个屏幕去按另一侧，握持也不稳；
+     ② cellphone 竖屏握持时,"左右倾斜"这个动作的轴与横屏不同（见 tilt.js 坑③）;
+     ③ 体感驾驶必须横屏（参考项目同理：它竖屏直接挡住页面）。
+     所以现在改成**三栏横屏布局**：左握把（转向）/ 中间控制台（体感）/ 右握把（油门刹车）。
+     竖屏不摆按钮，只显示一张「请把手机横过来」的提示。 */
+  :root {
+    --panel: #101a33;
+    --line: #24365a;
+    --ink: #8fb3e0;
+    --dim: #6f8fbb;
+    --hot: #4f9ad8;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
-    margin: 0; height: 100%; overflow: hidden; background: #0b1020; color: #8fb3e0;
+    margin: 0; height: 100%; overflow: hidden; background: #0b1020; color: var(--ink);
     font: 14px/1.5 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
     user-select: none; -webkit-user-select: none; touch-action: none;
   }
+
+  /* ---------- 顶部状态行（竖屏也保留：一眼能看出连接是否正常） ---------- */
   #status {
-    position: fixed; top: 0; left: 0; right: 0; padding: 6px 12px; z-index: 2;
-    display: flex; gap: 10px; align-items: center; font-size: 13px;
-    background: #0b1020dd; border-bottom: 1px solid #24365a;
+    position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 3;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: #0b1020ee; border-bottom: 1px solid var(--line); font-size: 13px;
   }
-  #dot { width: 10px; height: 10px; border-radius: 50%; background: #b04a4a; }
+  #dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: #b04a4a; }
   #dot.on { background: #4ac07a; }
-  .tiny {
-    border: 1px solid #24365a; border-radius: 8px; background: #101a33; color: #8fb3e0;
-    padding: 3px 9px; font-size: 12px;
+  #state {
+    flex: 0 1 auto; min-width: 0; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
   }
-  .tiny.on { background: #1d4f8a; border-color: #4f9ad8; color: #eaf4ff; }
-  #pad { position: fixed; inset: 56px 0 0 0; display: flex; }
-  /* 左右各占一半；按钮按**可用宽度均分**（用 flex 而不是固定 vw，
-     否则竖屏下两列加起来会超出屏幕、右侧被裁掉）*/
-  .side { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 2.5vw; padding: 0 2.5vw; }
+  #echo {
+    margin-left: auto; min-width: 0; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--dim);
+  }
+
+  /* ---------- 横屏三栏 ---------- */
+  #pad { position: fixed; inset: 46px 0 0 0; display: flex; }
+  /* 左右握把只占三分之一：中间的体感控制台需要地方。
+     按钮用 flex 均分**可用宽度**（不用固定 vw），换任何屏幕都不会溢出。 */
+  .grip { flex: 0 0 32%; min-width: 0; display: flex; align-items: center; gap: 1.6vw; padding: 2vh 1.6vw; }
   .btn {
-    flex: 1 1 0; min-width: 0; max-width: 220px;
-    border: 2px solid #24365a; border-radius: 18px; background: #101a33;
-    color: #8fb3e0; font-size: clamp(22px, 7vw, 34px); font-weight: 700;
+    /* 高度留到 84%：横屏下按钮不必顶天立地 —— 上下留出抓握边，拇指落点更稳 */
+    flex: 1 1 0; min-width: 0; height: 84%;
+    border: 2px solid var(--line); border-radius: 16px; background: var(--panel);
+    color: var(--ink); font-size: clamp(18px, 4.2vh, 30px); font-weight: 700;
     display: flex; align-items: center; justify-content: center;
-    height: 68vh; max-height: 460px;
   }
-  .btn:active, .btn.on { background: #1d4f8a; border-color: #4f9ad8; color: #eaf4ff; }
-  .btn.wide { height: 46vh; max-height: 320px; }
+  .btn:active, .btn.on { background: #1d4f8a; border-color: var(--hot); color: #eaf4ff; }
+
+  .console {
+    flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.2vh; padding: 1.4vh 1.2vw;
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  }
+  .console > * { margin: 0; }
+
+  /* 体感仪表：一根条 + 指针，比读数字直观 */
+  .gauge { width: 100%; max-width: 320px; display: flex; flex-direction: column; gap: 4px; align-items: center; }
+  .gauge-track {
+    position: relative; width: 100%; height: 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  }
+  .gauge-track i {
+    position: absolute; top: -3px; left: 50%; width: 4px; height: 16px;
+    background: var(--hot); border-radius: 2px; transform: translateX(-50%);
+    transition: left 60ms linear;
+  }
+  #tilt-readout { font-size: 12px; color: var(--dim); white-space: nowrap; }
+
+  #tilt-state { font-size: 13px; text-align: center; line-height: 1.5; }
+  #tilt-state.warn { color: #e8c07a; }
+  #tilt-state.ok { color: #8fe0b0; }
+  #tilt-raw { font-size: 11px; color: #4a6a9a; white-space: nowrap; }
+
+  .ctl-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .tiny {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
+    padding: 5px 10px; font-size: 12px;
+  }
+  .tiny.on { background: #1d4f8a; border-color: var(--hot); color: #eaf4ff; }
+  .range-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
+  .range-row input { width: min(160px, 22vw); }
+
+  /* ---------- 竖屏：只留提示 ---------- */
+  #rotate {
+    position: fixed; inset: 46px 0 0 0; z-index: 2; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 24px; text-align: center; background: #0b1020;
+  }
+  #rotate .rotate-icon { font-size: 46px; color: var(--hot); }
+  #rotate h1 { margin: 0; font-size: 22px; }
+  #rotate p { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.8; }
+  #rotate b { color: var(--ink); }
+
   #hint {
-    position: fixed; bottom: 6px; left: 0; right: 0; text-align: center;
-    font-size: 12px; color: #4a6a9a; z-index: 2;
+    position: fixed; bottom: 4px; left: 0; right: 0; z-index: 1;
+    text-align: center; font-size: 11px; color: #3f5c86;
+  }
+
+  @media (orientation: portrait) {
+    #pad { display: none; }
+    #rotate { display: flex; }
+    #hint { display: none; }
   }
 </style>
 </head>
@@ -48,24 +120,50 @@
   <div id="status">
     <span id="dot"></span>
     <span id="state">连接中…</span>
-    <span id="echo" style="margin-left:auto"></span>
-    <button class="tiny" id="tilt-btn">体感：关</button>
-    <button class="tiny" id="cal-btn">校准</button>
-    <button class="tiny" id="inv-btn">反向：关</button>
-    <button class="tiny" id="boost-btn">急转：小</button>
+    <span id="echo"></span>
   </div>
 
   <div id="pad">
-    <div class="side">
+    <section class="grip" aria-label="转向">
       <div class="btn" data-hold="left">◀</div>
       <div class="btn" data-hold="right">▶</div>
-    </div>
-    <div class="side">
-      <div class="btn wide" data-hold="brake">刹车</div>
-      <div class="btn wide" data-hold="accel">油门</div>
-    </div>
+    </section>
+
+    <section class="console" aria-label="体感控制">
+      <div class="gauge">
+        <div class="gauge-track"><i id="needle"></i></div>
+        <output id="tilt-readout">滚 —°　转向 0.00</output>
+      </div>
+      <p id="tilt-state" role="status">体感：关</p>
+      <div class="ctl-row">
+        <button class="tiny" id="tilt-btn">体感：关</button>
+        <button class="tiny" id="cal-btn">校准</button>
+        <button class="tiny" id="inv-btn">反向：关</button>
+      </div>
+      <label class="range-row">幅度
+        <input id="range" type="range" min="10" max="40" step="1" value="25">
+        <output id="range-value">25°</output>
+      </label>
+      <div class="ctl-row">
+        <button class="tiny" id="boost-btn">急转：关</button>
+      </div>
+      <p id="tilt-raw">β —　γ —　屏 —　拧 —</p>
+    </section>
+
+    <section class="grip" aria-label="油门与刹车">
+      <div class="btn" data-hold="brake">刹车</div>
+      <div class="btn" data-hold="accel">油门</div>
+    </section>
   </div>
-  <div id="hint">横屏握持 · 按住不放即持续输入 · 松手立刻停</div>
+
+  <div id="rotate">
+    <div class="rotate-icon" aria-hidden="true">↻</div>
+    <h1>请把手机横过来</h1>
+    <p>横屏才合手：左手 <b>◀ ▶</b> 转向，右手 <b>刹车 / 油门</b>。<br>
+       体感也只在横屏下允许 —— 竖屏时手机的「左右」是另一个方向。</p>
+  </div>
+
+  <div id="hint">按住不放即持续输入 · 松手立刻停 · 横屏握持</div>
 
 <script type="module">
 // ============================================================================
@@ -81,6 +179,12 @@
 //  为什么用 HTTP POST 而不是 WebSocket：不需要依赖、不需要协议，调试可见。
 //  为什么不设超时不行：连不上时会挂到系统 TCP 超时（~30 秒），
 //    界面就会显示成"往返 29000ms"，把人误导成"延迟高"。
+//
+//  ★ 本轮（v7）改了三件事，都是真机实测（用户：触摸延迟 ≤50ms）之后才动的：
+//    ① 布局改横屏优先 + 竖屏提示（原话：「竖屏的一点也不合手」）；
+//    ② 把「为什么现在没在转向」显示出来 —— 上一轮的失败模式是"点了没反应"，
+//       根因是提示被心跳擦掉；现在状态、原始读数、仪表三样常驻，不再靠猜；
+//    ③ 参数（幅度/反向/急转）存 localStorage，调一次不用每次重调。
 // ============================================================================
 
 import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, mergeTurn }
@@ -94,6 +198,14 @@ const stateEl = document.getElementById('state');
 const echoEl = document.getElementById('echo');
 const tiltBtn = document.getElementById('tilt-btn');
 const calBtn = document.getElementById('cal-btn');
+const needle = document.getElementById('needle');
+const tiltStateEl = document.getElementById('tilt-state');
+const tiltReadoutEl = document.getElementById('tilt-readout');
+const tiltRawEl = document.getElementById('tilt-raw');
+const rangeEl = document.getElementById('range');
+const rangeValueEl = document.getElementById('range-value');
+const boostBtn = document.getElementById('boost-btn');
+const invBtn = document.getElementById('inv-btn');
 
 const pad = createPadState();
 let seq = 0;             // 包序号：让游戏侧丢弃乱序/迟到的旧包
@@ -113,14 +225,43 @@ function setNotice(text) {
 const sending = !new URLSearchParams(location.search).has('nostream');
 
 // ---------------------------------------------------------------------------
-//  体感状态
+//  可调参数（存 localStorage）—— 用户调一次，下次打开还在
 // ---------------------------------------------------------------------------
-const TILT_RANGE_DEG = 25;   // 打到满舵需要倾斜多少度（越大越"迟钝"）
+const SETTINGS_KEY = 'my-kart-pad-settings';
 const SENSOR_STALE_MS = 600; // 传感器多久没数据就当作失效（切后台等）
 const CAL_STABLE_MS = 160;   // 中位校准：姿势**稳定这么久**才取零
 
+// 「急转加成」：角速度（陀螺仪，"你拧得多快"）带来的额外转向。
+// 为什么它只做加成：角速度**松手就归零**，纯用它就没法保持一个弯。
+//
+// ★ 默认从"小"改成"关"（v7）：两个参考项目都**没有**用陀螺仪角速度
+//   （kart-royale 与 chinese-can-fly-kart 都只用 deviceorientation 的倾角），
+//   也就是我们这一路是自创的；而它读的是 rotationRate.alpha（绕屏幕法线"拧"），
+//   与主转向（由 beta/gamma 投影出的滚转角）不是同一个动作轴。
+//   所以先默认关，让**基础倾角**单独验证 —— 一次只改一件事，才不会分不清是谁在起作用。
+//   要试就点面板上的「急转」按钮，四档循环（关/小/中/大）。
+const BOOST_STEPS = [0, 0.25, 0.5, 0.8];
+const BOOST_LABELS = ['关', '小', '中', '大'];
+
+const settings = { range: 25, invert: false, boost: 0 };
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    if (Number.isFinite(s.range) && s.range >= 10 && s.range <= 40) settings.range = s.range;
+    if (typeof s.invert === 'boolean') settings.invert = s.invert;
+    if (Number.isInteger(s.boost) && s.boost >= 0 && s.boost < BOOST_STEPS.length) settings.boost = s.boost;
+  } catch { /* 无痕模式 / 存储被禁用：用默认值即可，不要因此崩掉 */ }
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* 存不了就算了 */ }
+}
+loadSettings();
+
+// ---------------------------------------------------------------------------
+//  体感状态
+// ---------------------------------------------------------------------------
 let tiltOn = false;
-let invert = false;        // 反向：万一轴/符号反了，玩家自己一键翻过来，不用等我改代码
 let raw = null;            // 当前滚转角（度）
 let zero = null;           // 校准中位
 let sensorAt = 0;          // 最后一次收到传感器数据的时刻
@@ -128,15 +269,14 @@ let candidate = null;      // 稳定判定用的候选零位
 let stableAt = 0;
 let lastBeta = null;       // 原始读数，显示出来供现场判断（轴的对应关系是设备事实）
 let lastGamma = null;
-
-// 「急转加成」：角速度（陀螺仪，"你拧得多快"）带来的额外转向。
-// 为什么它只做加成：角速度**松手就归零**，纯用它就没法保持一个弯。
-const RATE_STALE_MS = 300;   // 多久没收到角速度就当作"没在拧"
-const BOOST_STEPS = [0, 0.25, 0.5, 0.8];
-const BOOST_LABELS = ['关', '小', '中', '大'];
-let boostIdx = 1;            // 默认"小"
-let rateDps = 0;             // 当前拧的角速度（度/秒）
+let rateDps = 0;           // 当前拧的角速度（度/秒）
 let rateAt = 0;
+const RATE_STALE_MS = 300; // 多久没收到角速度就当作"没在拧"
+
+/** 当前是不是横屏。**不是**为了排版好看 —— 体感的"左右"方向由它决定（tilt.js 坑③）。 */
+function isLandscape() {
+  return matchMedia('(orientation: landscape)').matches;
+}
 
 /** 当前屏幕方向（各家浏览器报告方式不一致，交给 tilt.js 归一） */
 function currentScreenAngle() {
@@ -144,19 +284,39 @@ function currentScreenAngle() {
     legacy: window.orientation,
     angle: screen?.orientation?.angle,
     type: screen?.orientation?.type,
-    landscape: matchMedia('(orientation: landscape)').matches,
+    landscape: isLandscape(),
   });
 }
 
-/** 体感给出的转向量；没数据/没校准/数据过期一律 0（不能让车因为传感器坏了就乱转） */
+const fmt = (x) => (x === null || x === undefined || Number.isNaN(x) ? '—' : Math.round(x));
+
+/**
+ * 体感给出的转向量；没数据/没校准/数据过期/不是横屏 一律 0
+ * （不能让车因为传感器坏了或姿势不对就乱转）
+ */
 function tiltTurn() {
   if (!tiltOn || raw === null || zero === null) return 0;
+  if (!isLandscape()) return 0;                          // 竖屏：定义的"左右"不一样，直接不要
   if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
-  const base = steerFromTilt(angleDifference(raw, zero), TILT_RANGE_DEG, invert);
+  const base = steerFromTilt(angleDifference(raw, zero), settings.range, settings.invert);
   // 「拧得快 = 急转」：角速度只做短暂加成（它的读数在 300ms 内才算数）
   const fresh = performance.now() - rateAt <= RATE_STALE_MS;
-  const rate = fresh ? rateDps * (invert ? -1 : 1) : 0;
-  return combineSteer(base, rate, BOOST_STEPS[boostIdx]);
+  const rate = fresh ? rateDps * (settings.invert ? -1 : 1) : 0;
+  return combineSteer(base, rate, BOOST_STEPS[settings.boost]);
+}
+
+/** 体感现在的状态，直接显示给人看 —— "为什么没转"必须一眼可读 */
+function tiltStatus() {
+  if (!tiltOn) {
+    return window.isSecureContext
+      ? { text: '体感：关（点左边按钮开启）', cls: '' }
+      : { text: '体感：需要 https 打开 —— 当前是 http，传感器拿不到', cls: 'warn' };
+  }
+  if (!isLandscape()) return { text: '体感：请把手机横过来', cls: 'warn' };
+  if (raw === null) return { text: '体感：手机接近平放，立起来握', cls: 'warn' };
+  if (zero === null) return { text: '体感：校准中…（拿稳别动）', cls: 'warn' };
+  if (performance.now() - sensorAt > SENSOR_STALE_MS) return { text: '体感：传感器无数据', cls: 'warn' };
+  return { text: '体感：就绪，倾斜即转向', cls: 'ok' };
 }
 
 /** 陀螺仪：只关心"你拧得多快"（rotationRate 单位是度/秒） */
@@ -187,6 +347,10 @@ function onOrientation(e) {
 }
 
 async function enableTilt() {
+  if (!isLandscape()) {
+    setNotice('请先把手机横过来（体感只在横屏下用）');
+    return;
+  }
   if (!window.isSecureContext) {
     setNotice('体感需要 https 打开（当前不是安全上下文）');
     return;
@@ -245,20 +409,65 @@ calBtn.addEventListener('click', () => {
   setNotice('已重新校准');
 });
 
-document.getElementById('inv-btn').addEventListener('click', (ev) => {
-  invert = !invert;
-  ev.currentTarget.textContent = '反向：' + (invert ? '开' : '关');
-  ev.currentTarget.classList.toggle('on', invert);
+invBtn.addEventListener('click', (ev) => {
+  settings.invert = !settings.invert;
+  saveSettings();
+  syncControls();
+  ev.currentTarget.blur?.();
 });
 
-const boostBtn = document.getElementById('boost-btn');
-boostBtn.addEventListener('click', () => {
-  boostIdx = (boostIdx + 1) % BOOST_STEPS.length;
-  boostBtn.textContent = '急转：' + BOOST_LABELS[boostIdx];
-  boostBtn.classList.toggle('on', boostIdx > 0);
+boostBtn.addEventListener('click', (ev) => {
+  settings.boost = (settings.boost + 1) % BOOST_STEPS.length;
+  saveSettings();
+  syncControls();
+  ev.currentTarget.blur?.();
 });
-boostBtn.textContent = '急转：' + BOOST_LABELS[boostIdx];
-boostBtn.classList.toggle('on', boostIdx > 0);
+
+rangeEl.addEventListener('input', () => {
+  settings.range = Number(rangeEl.value);
+  rangeValueEl.textContent = settings.range + '°';
+  saveSettings();
+});
+
+/** 把 settings 里的值画回控件上（初始化、改完、读档后都走它） */
+function syncControls() {
+  invBtn.textContent = '反向：' + (settings.invert ? '开' : '关');
+  invBtn.classList.toggle('on', settings.invert);
+  boostBtn.textContent = '急转：' + BOOST_LABELS[settings.boost];
+  boostBtn.classList.toggle('on', settings.boost > 0);
+  rangeEl.value = String(settings.range);
+  rangeValueEl.textContent = settings.range + '°';
+}
+syncControls();
+
+// ---------------------------------------------------------------------------
+//  体感仪表的刷新（每帧一次，纯 DOM，不走网络）
+// ---------------------------------------------------------------------------
+let lastStatusKey = '';
+let lastRawKey = '';
+
+function updateTiltUi() {
+  const t = tiltTurn();
+  needle.style.left = (50 + t * 46) + '%';
+  const deg = (raw !== null && zero !== null) ? angleDifference(raw, zero) : null;
+  tiltReadoutEl.textContent = `滚 ${deg === null ? '—' : Math.round(deg)}°　转向 ${t.toFixed(2)}`;
+
+  const st = tiltStatus();
+  const key = st.text + st.cls;
+  if (key !== lastStatusKey) {
+    lastStatusKey = key;
+    tiltStateEl.textContent = st.text;
+    tiltStateEl.className = st.cls;      // 空字符串 = 恢复默认色
+  }
+
+  const rawKey = `${fmt(lastBeta)}|${fmt(lastGamma)}|${currentScreenAngle()}|${fmt(rateDps)}`;
+  if (rawKey !== lastRawKey) {
+    lastRawKey = rawKey;
+    tiltRawEl.textContent = `β ${fmt(lastBeta)}　γ ${fmt(lastGamma)}　屏 ${currentScreenAngle()}°　拧 ${fmt(rateDps)}`;
+  }
+  requestAnimationFrame(updateTiltUi);
+}
+requestAnimationFrame(updateTiltUi);
 
 // ---------------------------------------------------------------------------
 //  发送
@@ -281,9 +490,11 @@ async function send() {
     const ms = performance.now() - t0;
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    // 3 秒内不覆盖提示（否则失败原因一写就被心跳擦掉，见上面 setNotice 的注释）
-    if (!tiltOn && performance.now() - noticeAt > 3000) {
-      stateEl.textContent = `已连接 · v6 · 往返 ${Math.round(rttMs)} ms`;
+    // 3 秒内不覆盖提示（否则失败原因一写就被心跳擦掉，见上面 setNotice 的注释）。
+    // ★ 这里不再用 `!tiltOn` 作条件：体感开着时也照样显示连接与往返
+    //   —— 体感自己的状态在中间栏常驻，两件事不该抢同一行。
+    if (performance.now() - noticeAt > 3000) {
+      stateEl.textContent = `已连接 · v7 · 往返 ${Math.round(rttMs)} ms`;
     }
   } catch (e) {
     dot.classList.remove('on');
@@ -291,15 +502,7 @@ async function send() {
     const why = e && e.name === 'TimeoutError' ? '超时（1.5 秒没响应）' : (e.message || e);
     stateEl.textContent = '连不上电脑（' + why + '）';
   }
-  const t = tiltTurn();
-  // 体感开着时把**原始读数**也显示出来：beta/gamma/屏幕角度/滚转角。
-  // 原因：轴的对应关系（哪个轴才是"左右歪"）是设备事实，我在这台机器上推不出来，
-  // 只有你在手机上歪一下、把数字念给我，才能一次定位（而不是我再猜一轮）。
-  const fmt = (x) => (x === null || x === undefined ? '—' : Math.round(x));
-  echoEl.textContent = `油门 ${input.forward}  转向 ${input.turn.toFixed(2)}`
-    + (tiltOn
-      ? `  β${fmt(lastBeta)} γ${fmt(lastGamma)} 屏${currentScreenAngle()} 滚${fmt(raw)} 拧${fmt(rateDps)}`
-      : '');
+  echoEl.textContent = `油门 ${input.forward}　转向 ${input.turn.toFixed(2)}`;
 }
 
 // 按下 / 松开：用 Pointer Events，天然支持多点触控
