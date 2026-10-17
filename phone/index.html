@@ -188,6 +188,7 @@
         <output id="angle">0°</output>
         <div class="meter" aria-hidden="true"><i id="needle"></i></div>
         <p id="tilt-state" role="status">体感：关</p>
+        <a class="pill warm" id="https-link" href="#" hidden>➜ 点这里改用 https（体感需要）</a>
         <button class="pill" id="tilt-btn">开启体感</button>
         <div class="pair">
           <button class="pill" id="cal-btn">校准中位</button>
@@ -290,6 +291,15 @@ function setNotice(text) {
 }
 
 const sending = !new URLSearchParams(location.search).has('nostream');   // ?nostream=1：截图/排查用
+
+// ★ 体感只能在安全上下文（https）里用。用户很常见地是用 http 打开的，
+//   光在状态行写"需要 https"不够 —— 他得知道具体怎么办。所以直接给一个**可点的链接**：
+//   点一下就换到同一页的 https 版本（端口 8443，与 dev-server 的 HTTPS_PORT 一致）。
+const httpsLink = document.getElementById('https-link');
+if (!window.isSecureContext && location.protocol === 'http:') {
+  httpsLink.hidden = false;
+  httpsLink.href = `https://${location.hostname}:8443${location.pathname}${location.search}`;
+}
 
 // ---------------------------------------------------------------------------
 //  参数（存 localStorage）
