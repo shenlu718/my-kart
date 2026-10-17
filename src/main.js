@@ -31,6 +31,13 @@ installFeel();
 //   （服务器开头的 at:0 是"还没人连过"的哨兵，直接忽略。）
 let remoteInput = createRemoteInput();
 let remoteConnected = false;
+// 手机手柄该打开的地址（由 dev-server 的 /api/info 提供）。
+// IP 随网络切换而变，把它写在指标面板上 —— 用户就不用每次问"地址是多少"。
+let phoneUrl = '';
+fetch('/api/info')
+  .then((r) => r.json())
+  .then((info) => { phoneUrl = info && info.phoneUrl ? info.phoneUrl : ''; })
+  .catch(() => { /* 没有服务器也正常（比如直接开文件），不影响游戏 */ });
 // ?nostream=1 时不连输入流 —— 给截图 / 排查用。
 // （一条永不结束的连接会让"等网络空闲"的渲染工具超时，实测过。）
 const wantRemoteStream = !new URLSearchParams(location.search).has('nostream');
@@ -447,7 +454,8 @@ function renderPanel() {
     `镜头领入 ${metrics.leadDeg.toFixed(1).padStart(5)} °   启用 ${(metrics.lead * 100).toFixed(0).padStart(3)} %\n` +
     `车在画面 ${(metrics.frameX >= 0 ? '+' : '') + metrics.frameX.toFixed(2)}   横移 ${metrics.offsetV.toFixed(2)} NDC/秒\n` +
     `车占屏   ${(metrics.framing * 100).toFixed(1).padStart(5)} %\n` +
-    `手柄     ${remoteConnected ? '✅ 手机已连接' : '—  未连接（手机打开 /phone/）'}\n` +
+    `手柄     ${remoteConnected ? '✅ 手机已连接' : '—  未连接（手机打开下面那个地址）'}\n` +
+    `手机地址 ${phoneUrl || '（检测中…）'}\n` +
     `— 相机 —\n` +
     `距离 ${cam.distance.toFixed(1)}  俯角 ${cam.angleDeg}°  峰值 ×${speedScale.toFixed(1)}\n` +
     `[ ] 距离  - = 俯角  , . 速度  P 收起面板\n` +

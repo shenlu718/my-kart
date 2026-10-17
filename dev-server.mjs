@@ -176,6 +176,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 2c. 给游戏页面自报"手机该打开哪个地址"
+  // ★ 为什么（用户反复卡在这里）：手机热点的 IP 每次切换网络都会变，
+  //   而地址只打在服务器控制台上 —— 用户看不到控制台（它是后台进程），
+  //   于是每次都问"地址是多少"。让游戏页面自己显示，就不用问了。
+  if (urlPath === '/api/info') {
+    const lan = lanAddresses()[0];
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({
+      phoneUrl: lan ? `http://${lan.address}:${PORT}/phone/` : '',
+      phoneUrlHttps: lan ? `https://${lan.address}:8443/phone/` : '',
+    }));
+    return;
+  }
+
   if (urlPath === '/api/stream') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
