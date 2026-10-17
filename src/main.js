@@ -65,7 +65,45 @@ try {
         const g = o.geometry;
         tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
       });
-      glbStatus = `✅ ${meshes} 网格 / ${Math.round(tris)} 三角面`;
+
+      const root = gltf.scene;
+      // ① 这个模型车头朝 +Z（前轮在 z=+0.857），我们的约定是朝 −Z → 转 180°
+      root.rotation.y = Math.PI;
+      // ② 缩放让轮半径对上 WHEEL_RADIUS（模型轮心高 0.3 m，我们是 0.25）
+      root.scale.setScalar(WHEEL_RADIUS / 0.3);
+
+      // ③ 四个轮子各包一层 pivot：前轮靠 pivot.rotation.y 转向，后轮 pivot 为 null。
+      //    这一步是"换模型"唯一有技术风险的地方，接口对齐之后就与模型无关了。
+      const grab = (name, steerable) => {
+        const node = root.getObjectByName(name);
+        if (!node || !node.parent) return null;
+        const parent = node.parent;
+        const pivot = new THREE.Group();
+        pivot.position.copy(node.position);
+        parent.add(pivot);
+        parent.remove(node);
+        node.position.set(0, 0, 0);
+        pivot.add(node);
+        return { mesh: node, pivot: steerable ? pivot : null };
+      };
+      const newWheels = [
+        grab('wheel-front-left', true),
+        grab('wheel-front-right', true),
+        grab('wheel-back-left', false),
+        grab('wheel-back-right', false),
+      ].filter(Boolean);
+
+      if (newWheels.length !== 4) {
+        // 找不到轮子就保留方块车 —— 宁可丑，不能白屏或轮子不动
+        glbStatus = `⚠ 只找到 ${newWheels.length} 个轮子，保留方块车`;
+        return;
+      }
+
+      for (const child of kart.children) child.visible = false;   // 方块车退场
+      kart.add(root);
+      wheels = newWheels;
+      wheelSpinSign = -1;
+      glbStatus = `✅ ${meshes} 网格 / ${Math.round(tris)} 三角面 · 已换成真车`;
     },
     undefined,
     (err) => { glbStatus = '❌ 加载失败（看浏览器 console）'; console.warn('[GLB]', err); },
@@ -263,7 +301,12 @@ function createKart() {
   return { group, wheels };
 }
 
-const { group: kart, wheels } = createKart();
+const kartObj = createKart();
+const kart = kartObj.group;
+// ★ 为什么是 let：换成 GLB 模型时要重建这组轮子。接口保持 {mesh, pivot|null} 不变，
+//   所以帧循环里那三行动画代码（pivot.rotation.y / mesh.rotation.x）一个字都不用改。
+let wheels = kartObj.wheels;
+let wheelSpinSign = 1;   // GLB 模型整体转了 180°，滚动方向要反号
 scene.add(kart);
 
 
@@ -662,7 +705,7 @@ function frame() {
   wheelRoll += (state.speed * dt) / WHEEL_RADIUS;
   for (const w of wheels) {
     if (w.pivot) w.pivot.rotation.y = turnSmooth * MAX_STEER;      // 前轮摆角 = 真实转向角
-    w.mesh.rotation.x = wheelRoll;                                    // 四个轮子都在滚
+    w.mesh.rotation.x = wheelRoll * wheelSpinSign;                   // 四个轮子都在滚
   }
 
   // ---- 参照物跟着循环（把落到身后的桩子搬到身前）----
