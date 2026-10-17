@@ -88,6 +88,9 @@
     transition: transform .06s, background .06s;
   }
   .face:active, .face.on { background: #c3cfdc; transform: scale(.95); }
+  /* 体感就绪时方向键自动禁用：转向只有一个来源，两个输入源不该打架。
+     （用户实测：「开启体感的状态下，左右方向键竟然还是有用的，而且优先级比体感高，很矛盾」）*/
+  .face.disabled { opacity: .3; pointer-events: none; }
   /* 油门：长按最多的键，用最深一档，和刹车一眼分开 */
   .face.primary { background: var(--deep); border-color: var(--deep); color: #f7fafc; }
   .face.primary:active, .face.primary.on { background: var(--deep-held); }
@@ -552,8 +555,41 @@ document.addEventListener('fullscreenchange', () => {
 let lastStateKey = '';
 let lastRawKey = '';
 
+/**
+ * 体感就绪时禁用左右方向键。
+ *
+ * ★ 为什么（用户实测指出的矛盾）：「开启体感之后，左右方向键竟然还是有用的，
+ *   而且按键的优先级比体感的高」。根因是 pad-input.js 的 mergeTurn 规则
+ *   「按着方向键就完全听方向键」—— 那是照参考项目抄的（它没有体感模式）。
+ *   这里从 UI 层解决：体感就绪期间方向键半透明、不响应，不产生第二路输入。
+ *
+ * ★ 为什么不永久删掉：体感在 http、权限被拒、传感器失效、或根本没开时，
+ *   方向键是唯一的转向手段。所以是「按状态禁用」，不是删除。
+ */
+let directionLocked = false;
+function setDirectionLocked(locked) {
+  if (locked === directionLocked) return;
+  directionLocked = locked;
+  for (const el of document.querySelectorAll('[data-hold="left"],[data-hold="right"]')) {
+    el.classList.toggle('disabled', locked);
+  }
+  if (locked) {
+    // 正按着方向键时切换过来 → 松开触点，免得卡在"一直转"
+    for (const [contact, action] of [...pad.contacts]) {
+      if (action === 'left' || action === 'right') releaseContact(pad, contact);
+    }
+    send();
+  }
+}
+
 function updateUi() {
   const t = tiltTurn();
+  // 只有体感真的在给输入时才锁方向键；"开了但还没校准/传感器没数据"不锁，
+  // 否则他在那个状态下就没有任何转向手段了。
+  const tiltReady = tiltOn && zero !== null && raw !== null
+    && performance.now() - sensorAt <= SENSOR_STALE_MS && isLandscape();
+  setDirectionLocked(tiltReady);
+
   needle.style.left = (50 + t * 46) + '%';
   const deg = (raw !== null && zero !== null) ? angleDifference(raw, zero) : null;
   angleEl.textContent = (deg === null ? '—' : Math.round(deg)) + '°';
@@ -595,7 +631,7 @@ async function send() {
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
     if (performance.now() - noticeAt > 3000) {
-      stateEl.textContent = `已连接 · v10 · 往返 ${Math.round(rttMs)} ms`;
+      stateEl.textContent = `已连接 · v11 · 往返 ${Math.round(rttMs)} ms`;
     }
   } catch (e) {
     dot.classList.remove('on');
