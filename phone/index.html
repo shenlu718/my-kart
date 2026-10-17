@@ -2,256 +2,309 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<!-- 手机手柄：**横屏优先**。竖屏时显示「请把手机横过来」，不摆按钮。 -->
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0b1020">
 <title>my-kart 手柄</title>
 <style>
-  /* ★ 2026-10 重构：原来是「左右各半屏」的两列按钮，竖屏也能显示 ——
-     但用户的实测结论是「竖屏一点也不合手」。原因不只是习惯：
-     ① 竖屏时手指要跨过整个屏幕去按另一侧，握持也不稳；
-     ② cellphone 竖屏握持时,"左右倾斜"这个动作的轴与横屏不同（见 tilt.js 坑③）;
-     ③ 体感驾驶必须横屏（参考项目同理：它竖屏直接挡住页面）。
-     所以现在改成**三栏横屏布局**：左握把（转向）/ 中间控制台（体感）/ 右握把（油门刹车）。
-     竖屏不摆按钮，只显示一张「请把手机横过来」的提示。 */
+  /* ==========================================================================
+     布局与视觉照参考项目 chinese-can-fly-kart/phone/controller.css 的做法重做。
+     学到的四条（都写进代码，避免下次再犯）：
+       ① **状态行只有 ~30px**，不是 46px —— 横屏下每一像素高度都金贵；
+       ② **主区用 grid 三栏 + 圆形大按键**（`--key` 用 dvh 算，跟着屏幕高度缩），
+          而不是"细长条矩形"——矩形在扁屏上又窄又高，按不准也不好看；
+       ③ **层级**：主界面只留「必须边开边看的」；幅度/反向/急转/原始读数全部收进设置弹层。
+          上一版把 6 行信息堆在中间栏，横屏（尤其被浏览器地址栏挤掉一块之后）直接叠字；
+       ④ **矮屏要专门适配**（`@media (max-height:330px)`），手机横屏时会撞到这个高度。
+
+     用户实测反馈（本轮修的）：
+       · 「全都被网页挤压没了」→ 状态行压到 30px、信息分层、加「全屏」按钮（全屏后地址栏消失）；
+       · 「往右倾斜车往左歪」→ 这是**设备事实**（握持方向 × 屏幕方向报告），推不出来，
+         所以加了「方向自测」：右倾 1 秒自动定符号（tilt.js 的 inferInvert，有测试）；
+       · 「没大角度就大幅右转」→ 满舵角度默认 25°→32°，且滑杆可在设置里调到 50°。
+     ========================================================================== */
   :root {
-    --panel: #101a33;
+    --bg: #0b1020;
+    --panel: #141d33;
     --line: #24365a;
-    --ink: #8fb3e0;
-    --dim: #6f8fbb;
-    --hot: #4f9ad8;
+    --ink: #cfe0f5;
+    --dim: #7b93b5;
+    --muted: #4a6a9a;
+    --accent: #4f9ad8;
+    --accent-deep: #1d4f8a;
+    /* 按键直径：跟屏幕高度走（dvh）+ 不超过宽度 20%，最矮屏也不会顶到边界 */
+    --key: min(28dvh, 20vw, 132px);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
-    margin: 0; height: 100%; overflow: hidden; background: #0b1020; color: var(--ink);
-    font: 14px/1.5 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
+    height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none;
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
     user-select: none; -webkit-user-select: none; touch-action: none;
   }
-
-  /* ---------- 顶部状态行（竖屏也保留：一眼能看出连接是否正常） ---------- */
-  #status {
-    position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 3;
-    display: flex; align-items: center; gap: 10px; padding: 0 12px;
-    background: #0b1020ee; border-bottom: 1px solid var(--line); font-size: 13px;
+  /* 刘海 / 圆角屏的安全区（参考项目也用）*/
+  body {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
-  #dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: #b04a4a; }
+  button { font: inherit; color: inherit; border: 0; background: none; touch-action: none; }
+
+  .shell {
+    height: 100%; display: grid; grid-template-rows: 30px minmax(0, 1fr);
+    gap: 4px; padding: 2px 10px 6px;
+  }
+
+  /* ---------- 状态行：只放「连接 + 往返 + 两个入口」 ---------- */
+  .topbar { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+  #dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #b04a4a; }
   #dot.on { background: #4ac07a; }
-  #state {
-    flex: 0 1 auto; min-width: 0; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
+  #state { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #echo { margin-left: auto; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .mini {
+    flex: 0 0 auto; min-height: 26px; padding: 2px 12px; font-size: 12px;
+    background: #1a2540; border: 1px solid var(--line); border-radius: 14px; color: var(--dim);
   }
-  #echo {
-    margin-left: auto; min-width: 0; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--dim);
-  }
+  .mini.on { background: var(--accent-deep); border-color: var(--accent); color: #eaf4ff; }
 
-  /* ---------- 横屏三栏 ---------- */
-  #pad { position: fixed; inset: 46px 0 0 0; display: flex; }
-  /* 左右握把只占三分之一：中间的体感控制台需要地方。
-     按钮用 flex 均分**可用宽度**（不用固定 vw），换任何屏幕都不会溢出。 */
-  .grip { flex: 0 0 32%; min-width: 0; display: flex; align-items: center; gap: 1.6vw; padding: 2vh 1.6vw; }
-  .btn {
-    /* 高度留到 84%：横屏下按钮不必顶天立地 —— 上下留出抓握边，拇指落点更稳 */
-    flex: 1 1 0; min-width: 0; height: 84%;
-    border: 2px solid var(--line); border-radius: 16px; background: var(--panel);
-    color: var(--ink); font-size: clamp(18px, 4.2vh, 30px); font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
+  /* ---------- 主区：左握把 / 中间体感 / 右握把 ---------- */
+  .pad {
+    min-height: 0; display: grid; align-items: center;
+    grid-template-columns: 1fr minmax(146px, 27%) 1fr; gap: 8px;
   }
-  .btn:active, .btn.on { background: #1d4f8a; border-color: var(--hot); color: #eaf4ff; }
+  .grip {
+    height: 100%; min-height: 0; display: flex; align-items: center;
+    justify-content: space-around; gap: 10px;
+  }
+  .face {
+    flex: 0 0 auto; width: var(--key); height: var(--key); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+    font-size: clamp(16px, 4.4dvh, 24px); font-weight: 600;
+    transition: transform .06s, background .06s;
+  }
+  .face:active, .face.on { background: var(--accent-deep); border-color: var(--accent); color: #eaf4ff; transform: scale(.95); }
+  /* 油门是长按最多的键：给最深的一档，和刹车一眼区分 */
+  .face.primary { background: #33486a; border-color: #44608c; }
+  .face.primary:active, .face.primary.on { background: var(--accent-deep); border-color: var(--accent); }
 
   .console {
-    flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 1.2vh; padding: 1.4vh 1.2vw;
-    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    height: 100%; min-height: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; min-width: 0;
   }
-  .console > * { margin: 0; }
-
-  /* 体感仪表：一根条 + 指针，比读数字直观 */
-  .gauge { width: 100%; max-width: 320px; display: flex; flex-direction: column; gap: 4px; align-items: center; }
-  .gauge-track {
-    position: relative; width: 100%; height: 12px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  #angle {
+    font-size: clamp(20px, 5.6dvh, 30px); font-variant-numeric: tabular-nums;
+    color: var(--ink); line-height: 1;
   }
-  .gauge-track i {
-    position: absolute; top: -3px; left: 50%; width: 4px; height: 16px;
-    background: var(--hot); border-radius: 2px; transform: translateX(-50%);
+  /* 刻度尺：中间的竖线是中位，指针左右滑 —— 比读数字直观 */
+  .meter {
+    position: relative; width: 100%; max-width: 190px; height: 18px; margin: 0 6px;
+    background: repeating-linear-gradient(to right, #2b3d60 0 1px, transparent 1px 10%);
+    border-right: 1px solid #2b3d60; border-radius: 2px;
+  }
+  .meter::after {
+    content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: #3d5480;
+  }
+  #needle {
+    position: absolute; z-index: 1; left: 50%; top: -4px; width: 3px; height: 26px;
+    border-radius: 2px; background: var(--accent); transform: translateX(-50%);
     transition: left 60ms linear;
   }
-  #tilt-readout { font-size: 12px; color: var(--dim); white-space: nowrap; }
-
-  #tilt-state { font-size: 13px; text-align: center; line-height: 1.5; }
-  #tilt-state.warn { color: #e8c07a; }
+  #tilt-state {
+    font-size: 12px; text-align: center; line-height: 1.4; color: var(--dim);
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
   #tilt-state.ok { color: #8fe0b0; }
-  #tilt-raw { font-size: 11px; color: #4a6a9a; white-space: nowrap; }
-
-  .ctl-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
-  .tiny {
-    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
-    padding: 5px 10px; font-size: 12px;
+  #tilt-state.warn { color: #e8c07a; }
+  .pill {
+    min-height: 34px; padding: 6px 16px; border-radius: 17px; font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--ink);
   }
-  .tiny.on { background: #1d4f8a; border-color: var(--hot); color: #eaf4ff; }
-  .range-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
-  .range-row input { width: min(160px, 22vw); }
+  .pill:active { background: #22304e; }
+  .pill.on { background: var(--accent-deep); border-color: var(--accent); color: #eaf4ff; }
+  .pill.ghost { background: transparent; color: var(--dim); }
 
-  /* ---------- 竖屏：只留提示 ---------- */
+  /* ---------- 设置弹层：所有"调一次就好"的东西都在这儿 ---------- */
+  dialog {
+    width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - 20px); overflow: auto;
+    background: #101a33; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 18px; padding: 18px; touch-action: pan-y;
+  }
+  dialog::backdrop { background: #05070dcc; }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .dlg-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 14px 0; font-size: 13px; }
+  .row label { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+  output { font-variant-numeric: tabular-nums; color: var(--dim); min-width: 38px; }
+  .note { font-size: 11px; color: var(--muted); line-height: 1.6; margin: 6px 0 0; }
+  #tilt-raw { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* ---------- 竖屏：只留提示（状态行保留，一眼能看出连接是否正常） ---------- */
   #rotate {
-    position: fixed; inset: 46px 0 0 0; z-index: 2; display: none;
+    position: fixed; inset: 0; z-index: 20; display: none;
     flex-direction: column; align-items: center; justify-content: center;
-    gap: 14px; padding: 24px; text-align: center; background: #0b1020;
+    gap: 16px; padding: 24px; text-align: center; background: var(--bg);
   }
-  #rotate .rotate-icon { font-size: 46px; color: var(--hot); }
-  #rotate h1 { margin: 0; font-size: 22px; }
-  #rotate p { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.8; }
+  #rotate .icon { font-size: 52px; color: var(--accent); }
+  #rotate h1 { margin: 0; font-size: 21px; font-weight: 600; }
+  #rotate p { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.8; max-width: 420px; }
   #rotate b { color: var(--ink); }
 
-  #hint {
-    position: fixed; bottom: 4px; left: 0; right: 0; z-index: 1;
-    text-align: center; font-size: 11px; color: #3f5c86;
+  @media (orientation: portrait) {
+    #rotate { display: flex; }
   }
 
-  @media (orientation: portrait) {
-    #pad { display: none; }
-    #rotate { display: flex; }
-    #hint { display: none; }
+  /* 矮屏（手机横屏被浏览器 UI 挤过之后就是这个高度）：把一切都收一档 */
+  @media (max-height: 340px) {
+    :root { --key: min(26dvh, 18vw, 106px); }
+    .shell { grid-template-rows: 26px minmax(0, 1fr); padding: 1px 8px 4px; gap: 2px; }
+    .console { gap: 6px; }
+    #echo { display: none; }
+    .pill { min-height: 28px; padding: 4px 12px; font-size: 12px; }
+    #tilt-state { font-size: 11px; }
   }
 </style>
 </head>
 <body>
-  <div id="status">
-    <span id="dot"></span>
-    <span id="state">连接中…</span>
-    <span id="echo"></span>
+  <div class="shell">
+    <header class="topbar">
+      <span id="dot"></span>
+      <span id="state">连接中…</span>
+      <span id="echo"></span>
+      <button class="mini" id="fs-btn">全屏</button>
+      <button class="mini" id="set-btn">设置</button>
+    </header>
+
+    <main class="pad">
+      <section class="grip" aria-label="转向">
+        <button class="face" data-hold="left" aria-label="左转">◀</button>
+        <button class="face" data-hold="right" aria-label="右转">▶</button>
+      </section>
+
+      <section class="console" aria-label="体感">
+        <output id="angle">0°</output>
+        <div class="meter" aria-hidden="true"><i id="needle"></i></div>
+        <p id="tilt-state" role="status">体感：关</p>
+        <button class="pill" id="tilt-btn">开启体感</button>
+        <button class="pill ghost" id="cal-btn">校准中位</button>
+      </section>
+
+      <section class="grip" aria-label="油门与刹车">
+        <button class="face" data-hold="brake" aria-label="刹车">刹车</button>
+        <button class="face primary" data-hold="accel" aria-label="油门">油门</button>
+      </section>
+    </main>
   </div>
 
-  <div id="pad">
-    <section class="grip" aria-label="转向">
-      <div class="btn" data-hold="left">◀</div>
-      <div class="btn" data-hold="right">▶</div>
-    </section>
+  <dialog id="settings-dialog">
+    <div class="dlg-head">
+      <h2>设置</h2>
+      <button class="mini" id="set-close">关闭</button>
+    </div>
 
-    <section class="console" aria-label="体感控制">
-      <div class="gauge">
-        <div class="gauge-track"><i id="needle"></i></div>
-        <output id="tilt-readout">滚 —°　转向 0.00</output>
-      </div>
-      <p id="tilt-state" role="status">体感：关</p>
-      <div class="ctl-row">
-        <button class="tiny" id="tilt-btn">体感：关</button>
-        <button class="tiny" id="cal-btn">校准</button>
-        <button class="tiny" id="inv-btn">反向：关</button>
-      </div>
-      <label class="range-row">幅度
-        <input id="range" type="range" min="10" max="40" step="1" value="25">
-        <output id="range-value">25°</output>
+    <div class="row">
+      <label>转向幅度
+        <input id="range" type="range" min="15" max="50" step="1" value="32">
       </label>
-      <div class="ctl-row">
-        <button class="tiny" id="boost-btn">急转：关</button>
-      </div>
-      <p id="tilt-raw">β —　γ —　屏 —　拧 —</p>
-    </section>
+      <output id="range-value">32°</output>
+    </div>
+    <p class="note">手机要倾斜多少度才打满方向。**觉得太灵敏、轻轻一歪就大幅转向 → 把它调大**（50° 最迟顿）。</p>
 
-    <section class="grip" aria-label="油门与刹车">
-      <div class="btn" data-hold="brake">刹车</div>
-      <div class="btn" data-hold="accel">油门</div>
-    </section>
-  </div>
+    <div class="row">
+      <button class="pill" id="dir-btn">方向自测</button>
+      <label><input id="invert" type="checkbox"> 反向</label>
+    </div>
+    <p class="note">方向对不对是**设备事实**（握持方向 × 屏幕方向），我推不出来。
+       点「方向自测」后把手机<b>向右倾</b>并保持 1 秒，会自动定好符号；也可直接勾「反向」手动翻。</p>
+
+    <div class="row">
+      <button class="pill" id="boost-btn">急转：关</button>
+      <span class="note" style="margin:0">陀螺仪"拧得快 = 急转"的额外加成（默认关，见 PROGRESS 第 12 轮）</span>
+    </div>
+
+    <p id="tilt-raw">β —　γ —　屏 —　拧 —</p>
+    <p class="note">上面是传感器原始读数：打开体感后倾斜手机，它们应该跟着变；
+       一直不动 = 传感器没出数据（先查 https 与权限）。</p>
+  </dialog>
 
   <div id="rotate">
-    <div class="rotate-icon" aria-hidden="true">↻</div>
+    <div class="icon" aria-hidden="true">↻</div>
     <h1>请把手机横过来</h1>
     <p>横屏才合手：左手 <b>◀ ▶</b> 转向，右手 <b>刹车 / 油门</b>。<br>
-       体感也只在横屏下允许 —— 竖屏时手机的「左右」是另一个方向。</p>
+       点右上角 <b>全屏</b> 可去掉浏览器地址栏、并尝试锁定横屏。</p>
   </div>
-
-  <div id="hint">按住不放即持续输入 · 松手立刻停 · 横屏握持</div>
 
 <script type="module">
 // ============================================================================
 //  手机手柄 —— 把「手指按了哪些键」+「手机怎么倾」发回电脑上的 dev-server
 //
-//  两块逻辑都在**可测的模块**里（手机页本身没有测试）：
+//  纯逻辑都在可测模块里（手机页本身没有测试）：
 //    src/pad-input.js   按钮 → 输入（含按钮/体感的合成规则）
-//    src/tilt.js        手机姿态 → 转向量（含 atan2、平放守卫、屏幕方向三个坑）
+//    src/tilt.js        姿态 → 转向量（atan2 / 平放守卫 / 屏幕方向三个坑 + 方向自测）
 //
-//  ★ 体感必须走 https：MDN 写明 DeviceOrientationEvent 只在安全上下文可用，
-//    安卓也一样。用 http 打开时下面会直接提示"体感需要 https"。
-//
-//  为什么用 HTTP POST 而不是 WebSocket：不需要依赖、不需要协议，调试可见。
-//  为什么不设超时不行：连不上时会挂到系统 TCP 超时（~30 秒），
-//    界面就会显示成"往返 29000ms"，把人误导成"延迟高"。
-//
-//  ★ 本轮（v7）改了三件事，都是真机实测（用户：触摸延迟 ≤50ms）之后才动的：
-//    ① 布局改横屏优先 + 竖屏提示（原话：「竖屏的一点也不合手」）；
-//    ② 把「为什么现在没在转向」显示出来 —— 上一轮的失败模式是"点了没反应"，
-//       根因是提示被心跳擦掉；现在状态、原始读数、仪表三样常驻，不再靠猜；
-//    ③ 参数（幅度/反向/急转）存 localStorage，调一次不用每次重调。
+//  ★ 体感必须走 https：MDN 写明 DeviceOrientationEvent 只在安全上下文可用。
+//  ★ 发送用 HTTP POST 而不是 WebSocket：不需要依赖、调试可见；
+//    但**必须设超时** —— 不设的话"连不上"会挂到系统 TCP 超时（~30 秒），
+//    界面显示成"往返 29000ms"，把人误导成"延迟高"（这是真踩过的）。
 // ============================================================================
 
 import { createPadState, pressAction, releaseContact, releaseAll, isHeld, padInput, mergeTurn }
   from '/src/pad-input.js';
-import { rollDegrees, angleDifference, steerFromTilt, screenAngle, combineSteer }
+import { rollDegrees, angleDifference, steerFromTilt, screenAngle, combineSteer, inferInvert }
   from '/src/tilt.js';
 
-const padEl = document.getElementById('pad');
 const dot = document.getElementById('dot');
 const stateEl = document.getElementById('state');
 const echoEl = document.getElementById('echo');
 const tiltBtn = document.getElementById('tilt-btn');
 const calBtn = document.getElementById('cal-btn');
+const fsBtn = document.getElementById('fs-btn');
+const setBtn = document.getElementById('set-btn');
+const setClose = document.getElementById('set-close');
+const settingsDialog = document.getElementById('settings-dialog');
+const angleEl = document.getElementById('angle');
 const needle = document.getElementById('needle');
 const tiltStateEl = document.getElementById('tilt-state');
-const tiltReadoutEl = document.getElementById('tilt-readout');
 const tiltRawEl = document.getElementById('tilt-raw');
 const rangeEl = document.getElementById('range');
 const rangeValueEl = document.getElementById('range-value');
+const invertEl = document.getElementById('invert');
+const dirBtn = document.getElementById('dir-btn');
 const boostBtn = document.getElementById('boost-btn');
-const invBtn = document.getElementById('inv-btn');
 
 const pad = createPadState();
 let seq = 0;             // 包序号：让游戏侧丢弃乱序/迟到的旧包
 let rttMs = null;
 
-// ★ 为什么要有"提示"这一路：send() 每 60ms 跑一次并重写状态行。
-//   如果失败原因（不是 https / 浏览器不支持 / 权限被拒）也写在同一行，
-//   它会在 60ms 内被心跳擦掉 —— 表现就是「点了没反应」。
-//   所以提示单独记时刻，心跳在 3 秒内不许覆盖它。
+// 提示单独记时刻，3 秒内不被心跳覆盖 —— 否则失败原因一闪就被擦掉（=「点了没反应」）
 let noticeAt = 0;
 function setNotice(text) {
   noticeAt = performance.now();
   stateEl.textContent = text;
 }
 
-// ?nostream=1：不发送（给截图 / 排查用，和主游戏页的同名开关是一对）
-const sending = !new URLSearchParams(location.search).has('nostream');
+const sending = !new URLSearchParams(location.search).has('nostream');   // ?nostream=1：截图/排查用
 
 // ---------------------------------------------------------------------------
-//  可调参数（存 localStorage）—— 用户调一次，下次打开还在
+//  可调参数（存 localStorage）
 // ---------------------------------------------------------------------------
 const SETTINGS_KEY = 'my-kart-pad-settings';
-const SENSOR_STALE_MS = 600; // 传感器多久没数据就当作失效（切后台等）
-const CAL_STABLE_MS = 160;   // 中位校准：姿势**稳定这么久**才取零
+const SENSOR_STALE_MS = 600;
+const CAL_STABLE_MS = 160;
 
-// 「急转加成」：角速度（陀螺仪，"你拧得多快"）带来的额外转向。
-// 为什么它只做加成：角速度**松手就归零**，纯用它就没法保持一个弯。
-//
-// ★ 默认从"小"改成"关"（v7）：两个参考项目都**没有**用陀螺仪角速度
-//   （kart-royale 与 chinese-can-fly-kart 都只用 deviceorientation 的倾角），
-//   也就是我们这一路是自创的；而它读的是 rotationRate.alpha（绕屏幕法线"拧"），
-//   与主转向（由 beta/gamma 投影出的滚转角）不是同一个动作轴。
-//   所以先默认关，让**基础倾角**单独验证 —— 一次只改一件事，才不会分不清是谁在起作用。
-//   要试就点面板上的「急转」按钮，四档循环（关/小/中/大）。
 const BOOST_STEPS = [0, 0.25, 0.5, 0.8];
 const BOOST_LABELS = ['关', '小', '中', '大'];
 
-const settings = { range: 25, invert: false, boost: 0 };
+/** 默认满舵角度 32°（原 25°）：用户实测「没明显大角度就大幅右转」→ 调大才迟钝 */
+const settings = { range: 32, invert: false, boost: 0 };
 
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-    if (Number.isFinite(s.range) && s.range >= 10 && s.range <= 40) settings.range = s.range;
+    if (Number.isFinite(s.range) && s.range >= 15 && s.range <= 50) settings.range = s.range;
     if (typeof s.invert === 'boolean') settings.invert = s.invert;
     if (Number.isInteger(s.boost) && s.boost >= 0 && s.boost < BOOST_STEPS.length) settings.boost = s.boost;
-  } catch { /* 无痕模式 / 存储被禁用：用默认值即可，不要因此崩掉 */ }
+  } catch { /* 无痕模式：用默认值，不要因此崩掉 */ }
 }
 function saveSettings() {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* 存不了就算了 */ }
@@ -264,21 +317,19 @@ loadSettings();
 let tiltOn = false;
 let raw = null;            // 当前滚转角（度）
 let zero = null;           // 校准中位
-let sensorAt = 0;          // 最后一次收到传感器数据的时刻
-let candidate = null;      // 稳定判定用的候选零位
+let sensorAt = 0;
+let candidate = null;
 let stableAt = 0;
-let lastBeta = null;       // 原始读数，显示出来供现场判断（轴的对应关系是设备事实）
+let lastBeta = null;
 let lastGamma = null;
-let rateDps = 0;           // 当前拧的角速度（度/秒）
+let rateDps = 0;
 let rateAt = 0;
-const RATE_STALE_MS = 300; // 多久没收到角速度就当作"没在拧"
+let dirTest = null;        // 方向自测：{ at, best }
+const RATE_STALE_MS = 300;
+const DIR_TEST_MS = 1200;  // 自测窗口：给他 1.2 秒把手机倾过去
 
-/** 当前是不是横屏。**不是**为了排版好看 —— 体感的"左右"方向由它决定（tilt.js 坑③）。 */
-function isLandscape() {
-  return matchMedia('(orientation: landscape)').matches;
-}
+function isLandscape() { return matchMedia('(orientation: landscape)').matches; }
 
-/** 当前屏幕方向（各家浏览器报告方式不一致，交给 tilt.js 归一） */
 function currentScreenAngle() {
   return screenAngle({
     legacy: window.orientation,
@@ -291,35 +342,33 @@ function currentScreenAngle() {
 const fmt = (x) => (x === null || x === undefined || Number.isNaN(x) ? '—' : Math.round(x));
 
 /**
- * 体感给出的转向量；没数据/没校准/数据过期/不是横屏 一律 0
+ * 体感给出的转向量；没数据 / 没校准 / 数据过期 / 不是横屏 一律 0
  * （不能让车因为传感器坏了或姿势不对就乱转）
  */
 function tiltTurn() {
   if (!tiltOn || raw === null || zero === null) return 0;
-  if (!isLandscape()) return 0;                          // 竖屏：定义的"左右"不一样，直接不要
+  if (!isLandscape()) return 0;
   if (performance.now() - sensorAt > SENSOR_STALE_MS) return 0;
   const base = steerFromTilt(angleDifference(raw, zero), settings.range, settings.invert);
-  // 「拧得快 = 急转」：角速度只做短暂加成（它的读数在 300ms 内才算数）
   const fresh = performance.now() - rateAt <= RATE_STALE_MS;
   const rate = fresh ? rateDps * (settings.invert ? -1 : 1) : 0;
   return combineSteer(base, rate, BOOST_STEPS[settings.boost]);
 }
 
-/** 体感现在的状态，直接显示给人看 —— "为什么没转"必须一眼可读 */
+/** 体感现在的状态 —— 「为什么没在转向」必须一眼可读 */
 function tiltStatus() {
   if (!tiltOn) {
     return window.isSecureContext
-      ? { text: '体感：关（点左边按钮开启）', cls: '' }
-      : { text: '体感：需要 https 打开 —— 当前是 http，传感器拿不到', cls: 'warn' };
+      ? { text: '体感：关（点下面开启）', cls: '' }
+      : { text: '体感需要 https（当前是 http，触摸仍可用）', cls: 'warn' };
   }
   if (!isLandscape()) return { text: '体感：请把手机横过来', cls: 'warn' };
   if (raw === null) return { text: '体感：手机接近平放，立起来握', cls: 'warn' };
   if (zero === null) return { text: '体感：校准中…（拿稳别动）', cls: 'warn' };
-  if (performance.now() - sensorAt > SENSOR_STALE_MS) return { text: '体感：传感器无数据', cls: 'warn' };
-  return { text: '体感：就绪，倾斜即转向', cls: 'ok' };
+  if (performance.now() - sensorAt > SENSOR_STALE_MS) return { text: '体感：传感器没数据', cls: 'warn' };
+  return { text: '体感：就绪 · 倾斜即转向', cls: 'ok' };
 }
 
-/** 陀螺仪：只关心"你拧得多快"（rotationRate 单位是度/秒） */
 function onMotion(e) {
   const r = e.rotationRate;
   if (!r || !Number.isFinite(r.alpha)) return;
@@ -332,11 +381,11 @@ function onOrientation(e) {
   lastBeta = e.beta;
   lastGamma = e.gamma;
   const v = rollDegrees(e.beta, e.gamma, currentScreenAngle());
-  if (v === null) { raw = null; zero = null; return; }   // 手机平放：给不出稳定滚转角
+  if (v === null) { raw = null; zero = null; return; }   // 平放：给不出稳定滚转角
   const now = performance.now();
   raw = v;
   sensorAt = now;
-  // 中位校准：不是"按一下就取当前值"，而是**姿势稳定 160ms 才取零**（乱动时取的零是错的）
+  // 中位校准：**姿势稳定 160ms 才取零**（乱动时取的零是错的）
   if (zero === null) {
     if (candidate === null || Math.abs(angleDifference(raw, candidate)) > 3) {
       candidate = raw;
@@ -347,80 +396,62 @@ function onOrientation(e) {
 }
 
 async function enableTilt() {
-  if (!isLandscape()) {
-    setNotice('请先把手机横过来（体感只在横屏下用）');
-    return;
-  }
-  if (!window.isSecureContext) {
-    setNotice('体感需要 https 打开（当前不是安全上下文）');
-    return;
-  }
-  if (typeof DeviceOrientationEvent === 'undefined') {
-    setNotice('这个浏览器不支持体感');
-    return;
-  }
+  if (!isLandscape()) { setNotice('请先把手机横过来（体感只在横屏下用）'); return; }
+  if (!window.isSecureContext) { setNotice('体感需要 https 打开（当前不是安全上下文）'); return; }
+  if (typeof DeviceOrientationEvent === 'undefined') { setNotice('这个浏览器不支持体感'); return; }
   try {
-    // iOS 需要显式授权（安卓一般不需要）；这个调用还必须在真实点击里发生
+    // iOS 需要显式授权，且必须在真实点击里；安卓一般不需要
     if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-      if (await DeviceOrientationEvent.requestPermission() !== 'granted') {
-        setNotice('体感权限被拒绝');
-        return;
-      }
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') { setNotice('体感权限被拒绝'); return; }
     }
-    // 陀螺仪是**另一个 API**，iOS 要**单独再申请一次**（资料里写明，很容易漏）
     if (typeof DeviceMotionEvent !== 'undefined'
         && typeof DeviceMotionEvent.requestPermission === 'function') {
       try { await DeviceMotionEvent.requestPermission(); } catch { /* 不给就算了，只用倾角 */ }
     }
     window.addEventListener('deviceorientation', onOrientation);
     window.addEventListener('devicemotion', onMotion);
-    // 转屏会改变"左右"的定义，中位必须作废重校
-    window.addEventListener('orientationchange', () => { zero = null; candidate = null; });
-    screen?.orientation?.addEventListener?.('change', () => { zero = null; candidate = null; });
+    // 转屏会改变"左右"的定义 → 中位作废重校
+    window.addEventListener('orientationchange', resetCalibration);
+    screen?.orientation?.addEventListener?.('change', resetCalibration);
     tiltOn = true;
     zero = null; candidate = null;
-    tiltBtn.textContent = '体感：开';
-    tiltBtn.classList.add('on');
+    syncControls();
     setNotice('体感已开 · 拿稳手机校准中…');
   } catch (e) {
     setNotice('体感开启失败（' + (e.message || e) + '）');
   }
 }
 
-tiltBtn.addEventListener('click', () => {
-  if (tiltOn) {
-    tiltOn = false;
-    window.removeEventListener('deviceorientation', onOrientation);
-    window.removeEventListener('devicemotion', onMotion);
-    tiltBtn.textContent = '体感：关';
-    tiltBtn.classList.remove('on');
-  } else {
-    enableTilt();
-  }
-});
+function disableTilt() {
+  tiltOn = false;
+  window.removeEventListener('deviceorientation', onOrientation);
+  window.removeEventListener('devicemotion', onMotion);
+  syncControls();
+}
+function resetCalibration() { zero = null; candidate = null; }
+
+tiltBtn.addEventListener('click', () => { tiltOn ? disableTilt() : enableTilt(); });
 
 calBtn.addEventListener('click', () => {
   if (!tiltOn) { enableTilt(); return; }
-  if (raw === null || performance.now() - sensorAt > SENSOR_STALE_MS) {
-    setNotice('请先拿稳手机');
-    return;
-  }
+  if (raw === null || performance.now() - sensorAt > SENSOR_STALE_MS) { setNotice('请先拿稳手机'); return; }
   zero = raw; candidate = null;
-  setNotice('已重新校准');
+  setNotice('已校准：以现在的握姿为中位');
 });
 
-invBtn.addEventListener('click', (ev) => {
-  settings.invert = !settings.invert;
-  saveSettings();
-  syncControls();
-  ev.currentTarget.blur?.();
+// ---- 方向自测：右倾 1.2 秒 → 自动定符号（tilt.js 的 inferInvert，有测试）----
+dirBtn.addEventListener('click', () => {
+  if (!tiltOn) { enableTilt(); return; }
+  if (raw === null || zero === null) { setNotice('先校准中位（或先拿稳手机）'); return; }
+  dirTest = { at: performance.now(), best: 0 };
+  settingsDialog.close();
+  setNotice('方向自测：把手机向右倾并保持 1 秒');
 });
 
-boostBtn.addEventListener('click', (ev) => {
-  settings.boost = (settings.boost + 1) % BOOST_STEPS.length;
+invertEl.addEventListener('change', () => {
+  settings.invert = invertEl.checked;
   saveSettings();
   syncControls();
-  ev.currentTarget.blur?.();
 });
 
 rangeEl.addEventListener('input', () => {
@@ -429,10 +460,17 @@ rangeEl.addEventListener('input', () => {
   saveSettings();
 });
 
-/** 把 settings 里的值画回控件上（初始化、改完、读档后都走它） */
+boostBtn.addEventListener('click', () => {
+  settings.boost = (settings.boost + 1) % BOOST_STEPS.length;
+  saveSettings();
+  syncControls();
+});
+
 function syncControls() {
-  invBtn.textContent = '反向：' + (settings.invert ? '开' : '关');
-  invBtn.classList.toggle('on', settings.invert);
+  tiltBtn.textContent = tiltOn ? '关闭体感' : '开启体感';
+  tiltBtn.classList.toggle('on', tiltOn);
+  calBtn.textContent = '校准中位';
+  invertEl.checked = settings.invert;
   boostBtn.textContent = '急转：' + BOOST_LABELS[settings.boost];
   boostBtn.classList.toggle('on', settings.boost > 0);
   rangeEl.value = String(settings.range);
@@ -440,24 +478,63 @@ function syncControls() {
 }
 syncControls();
 
+// ---- 设置弹层 ----
+setBtn.addEventListener('click', () => settingsDialog.showModal());
+setClose.addEventListener('click', () => settingsDialog.close());
+
+// ---- 全屏：去掉浏览器地址栏（横屏高度就回来了），并尝试锁定横屏 ----
+fsBtn.addEventListener('click', async () => {
+  try {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen?.({ navigationUI: 'hide' });
+      try { await screen.orientation?.lock?.('landscape'); } catch { /* 不支持就算了 */ }
+    } else {
+      await document.exitFullscreen?.();
+    }
+  } catch (e) {
+    setNotice('全屏失败：' + (e.message || e));
+  }
+});
+document.addEventListener('fullscreenchange', () => {
+  fsBtn.textContent = document.fullscreenElement ? '退出' : '全屏';
+  fsBtn.classList.toggle('on', !!document.fullscreenElement);
+});
+
 // ---------------------------------------------------------------------------
-//  体感仪表的刷新（每帧一次，纯 DOM，不走网络）
+//  每帧：刷新仪表 / 状态 / 方向自测采样（纯 DOM，不走网络）
 // ---------------------------------------------------------------------------
-let lastStatusKey = '';
+let lastStateKey = '';
 let lastRawKey = '';
 
-function updateTiltUi() {
+function updateUi() {
   const t = tiltTurn();
   needle.style.left = (50 + t * 46) + '%';
   const deg = (raw !== null && zero !== null) ? angleDifference(raw, zero) : null;
-  tiltReadoutEl.textContent = `滚 ${deg === null ? '—' : Math.round(deg)}°　转向 ${t.toFixed(2)}`;
+  angleEl.textContent = (deg === null ? '—' : Math.round(deg)) + '°';
+
+  // 方向自测：取窗口内**绝对值最大**的那次偏移（他右倾到底的那一刻）
+  if (dirTest) {
+    if (deg !== null && Math.abs(deg) > Math.abs(dirTest.best)) dirTest.best = deg;
+    if (performance.now() - dirTest.at > DIR_TEST_MS) {
+      const verdict = inferInvert(dirTest.best);
+      dirTest = null;
+      if (verdict === null) {
+        setNotice('没测到明显倾斜，再来一次（要真的向右倾）');
+      } else {
+        settings.invert = verdict;
+        saveSettings();
+        syncControls();
+        setNotice(verdict ? '方向已设好：右倾 = 右转（已自动反向）' : '方向正常：右倾 = 右转');
+      }
+    }
+  }
 
   const st = tiltStatus();
   const key = st.text + st.cls;
-  if (key !== lastStatusKey) {
-    lastStatusKey = key;
+  if (key !== lastStateKey) {
+    lastStateKey = key;
     tiltStateEl.textContent = st.text;
-    tiltStateEl.className = st.cls;      // 空字符串 = 恢复默认色
+    tiltStateEl.className = st.cls;
   }
 
   const rawKey = `${fmt(lastBeta)}|${fmt(lastGamma)}|${currentScreenAngle()}|${fmt(rateDps)}`;
@@ -465,52 +542,45 @@ function updateTiltUi() {
     lastRawKey = rawKey;
     tiltRawEl.textContent = `β ${fmt(lastBeta)}　γ ${fmt(lastGamma)}　屏 ${currentScreenAngle()}°　拧 ${fmt(rateDps)}`;
   }
-  requestAnimationFrame(updateTiltUi);
+  requestAnimationFrame(updateUi);
 }
-requestAnimationFrame(updateTiltUi);
+requestAnimationFrame(updateUi);
 
 // ---------------------------------------------------------------------------
 //  发送
 // ---------------------------------------------------------------------------
 async function send() {
   if (!sending) return;
-  const p = padInput(pad);                                  // 按钮这一路
-  const input = { forward: p.forward, turn: mergeTurn(p.turn, tiltTurn()) };  // 合成体感
+  const p = padInput(pad);
+  const input = { forward: p.forward, turn: mergeTurn(p.turn, tiltTurn()) };
   const t0 = performance.now();
   try {
     const res = await fetch('/api/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, seq: seq++ }),
-      // ★ 必须设超时：不设的话"连不上"会一直挂到系统 TCP 超时（实测约 30 秒），
-      //   界面上显示成"往返 29000ms" —— 把人误导成"延迟很高"，其实是根本不通。
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(1500),   // 必须设：见文件头注释
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const ms = performance.now() - t0;
     rttMs = rttMs === null ? ms : rttMs * 0.8 + ms * 0.2;
     dot.classList.add('on');
-    // 3 秒内不覆盖提示（否则失败原因一写就被心跳擦掉，见上面 setNotice 的注释）。
-    // ★ 这里不再用 `!tiltOn` 作条件：体感开着时也照样显示连接与往返
-    //   —— 体感自己的状态在中间栏常驻，两件事不该抢同一行。
     if (performance.now() - noticeAt > 3000) {
-      stateEl.textContent = `已连接 · v7 · 往返 ${Math.round(rttMs)} ms`;
+      stateEl.textContent = `已连接 · v8 · 往返 ${Math.round(rttMs)} ms`;
     }
   } catch (e) {
     dot.classList.remove('on');
-    rttMs = null;   // 失败就清掉，留着旧值会让人以为"还通着，只是慢"
+    rttMs = null;   // 留着旧值会让人以为"还通着，只是慢"
     const why = e && e.name === 'TimeoutError' ? '超时（1.5 秒没响应）' : (e.message || e);
     stateEl.textContent = '连不上电脑（' + why + '）';
   }
   echoEl.textContent = `油门 ${input.forward}　转向 ${input.turn.toFixed(2)}`;
 }
 
-// 按下 / 松开：用 Pointer Events，天然支持多点触控
-//
-// ★ 松手要听三个事件：pointerup / pointercancel / **lostpointercapture**。
-//   少了第三个：捕获被系统收走（来电、通知、手势冲突）时按钮会永远停在"按着"，车一直冲。
-//   另外**不听 pointerleave**：捕获之后手指滑出按钮不该算松手。
-for (const el of padEl.querySelectorAll('[data-hold]')) {
+// 按下 / 松开：Pointer Events，天然支持多点触控
+// ★ 松手听三个事件：pointerup / pointercancel / **lostpointercapture**（少了第三个，
+//   捕获被系统收走时按钮会一直停在"按着"，车一直冲）；不听 pointerleave。
+for (const el of document.querySelectorAll('[data-hold]')) {
   const action = el.dataset.hold;
 
   el.addEventListener('pointerdown', (e) => {
@@ -531,18 +601,16 @@ for (const el of padEl.querySelectorAll('[data-hold]')) {
   }
 }
 
-/** 一次松开所有按钮（切后台、页面隐藏、出错时都走它） */
 function releaseEverything() {
   releaseAll(pad);
-  document.querySelectorAll('.btn.on').forEach((b) => b.classList.remove('on'));
+  document.querySelectorAll('.face.on').forEach((b) => b.classList.remove('on'));
   send();
 }
 
 setInterval(send, 60);
 send();
 
-// ★ 屏幕常亮：不然玩到一半手机息屏，操控直接断。
-//   锁会在切后台时被系统释放，所以回前台要重新申请。
+// ★ 屏幕常亮：不然玩到一半手机息屏，操控直接断（锁在切后台时会被系统释放）
 let wakeLock = null;
 async function requestWakeLock() {
   try {
