@@ -138,28 +138,3 @@ export function combineSteer(tiltSteer, rateDps, gain) {
   return Math.max(-1, Math.min(1, sum));
 }
 
-// ---------------------------------------------------------------------------
-//  方向自测 —— 「哪一侧倾对应哪一侧转」是**设备事实**，推不出来，只能测一次。
-//
-//  用户实测原话：「我的手机往右倾斜，小车的轮子是往左歪的。」
-//  哪边倾该往哪边转，取决于：握持方向（横屏往左转还是往右转）
-//  × 浏览器对屏幕方向的报告 × 投影公式的符号。这三者相乘之后，
-//  在纸面上推是推不准的 —— 所以做成"往右倾 1 秒、自动定符号"。
-//
-//  约定：**右倾应当给出负数**（我们的 turn 负 = 右转）。
-// ---------------------------------------------------------------------------
-
-/** 判定方向所需的最小倾角（度）：比死区大不少，手抖误判不了 */
-export const TILT_INVERT_THRESHOLD_DEG = 5;
-
-/**
- * 由「向右倾时相对中位的读数」推断是否需要反向。
- * @param {number} rightTiltDeg 向右倾时的读数（相对校准中位，度）
- * @param {number} [threshold] 小于它就不判定
- * @returns {boolean|null} true=需要反向；false=不用；null=倾得太小或无读数（不猜）
- */
-export function inferInvert(rightTiltDeg, threshold = TILT_INVERT_THRESHOLD_DEG) {
-  if (!Number.isFinite(rightTiltDeg)) return null;
-  if (Math.abs(rightTiltDeg) < threshold) return null;
-  return rightTiltDeg > 0;
-}

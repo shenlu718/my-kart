@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   rollDegrees, angleDifference, steerFromTilt, screenAngle,
   steerBoost, combineSteer, RATE_FULL_DPS,
-  FLAT_THRESHOLD, STEER_DEADZONE_DEG, inferInvert,
+  FLAT_THRESHOLD, STEER_DEADZONE_DEG,
 } from './tilt.js';
 
 
@@ -133,27 +133,3 @@ test('合成：非法输入不会炸', () => {
   assert.equal(combineSteer(0.3, 90, 0), 0.3);
 });
 
-// ---------------------------------------------------------------------------
-//  方向自测：把「往右倾该往右转」这件事从猜测变成一次测量
-//
-//  用户实测原话：「我的手机往右倾斜，小车的轮子是往左歪的」——
-//  哪一侧倾对应哪一侧转，取决于**握持方向 + 屏幕方向报告**，
-//  是设备事实，推不出来，只能测一次。所以给一个"右倾 1 秒 → 自动定符号"的函数。
-// ---------------------------------------------------------------------------
-test('★ 方向自测：右倾时读数为正 → 需要反向（因为右倾应当给出负=右转）', () => {
-  assert.equal(inferInvert(12), true);
-  assert.equal(inferInvert(-12), false, '右倾给出负数 = 符号本来就对，不用反向');
-});
-
-test('方向自测：倾得太小 / 没读数 → 不判定（返回 null，别瞎猜）', () => {
-  assert.equal(inferInvert(0), null);
-  assert.equal(inferInvert(2), null, '小于阈值不判定 —— 手抖也会有几个度');
-  assert.equal(inferInvert(-2), null);
-  assert.equal(inferInvert(NaN), null);
-  assert.equal(inferInvert(null), null);
-});
-
-test('方向自测：阈值可调', () => {
-  assert.equal(inferInvert(5, 1), true);
-  assert.equal(inferInvert(5, 10), null);
-});
