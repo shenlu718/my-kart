@@ -16,6 +16,24 @@
     type="module" 表示这个 js 文件可以用 import 语法引用别的文件。
     代价：必须通过本地服务器打开，直接双击这个 html 会被浏览器安全策略拦住。
   -->
+  <!--
+    ★ importmap：给"裸模块名"起别名。
+      three 官方的 addons（GLTFLoader 等）内部写的是 `from 'three'`，
+      浏览器不认识裸名，所以必须在这里把它映射到本地文件。
+      `three/addons/` 那条是给 GLTFLoader 这类 addon 用的（它们自己又 import 了 ../utils/*）。
+
+    ★ 加了它之后，main.js 里的 `'../vendor/three/three.module.js'` 必须同步改成 `'three'` ——
+      否则同一份 three 会按两个不同 URL 各加载一次（ESM 按 URL 缓存），
+      表现是 instanceof 判断失效、双重材质，而且**不报错**，极难查。
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

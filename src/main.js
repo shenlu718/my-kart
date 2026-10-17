@@ -7,7 +7,10 @@
 //    main.js       只剩「听浏览器事件」和「画到屏幕上」——这两件测不了的事
 // ============================================================================
 
-import * as THREE from '../vendor/three/three.module.js';
+// ★ 用裸名 'three' 而不是相对路径：index.html 里有 importmap 把它映射到
+//   vendor/three/three.module.js。这样 addons（GLTFLoader 里写 `from 'three'`）
+//   才能和主程序共用**同一份** three —— 否则会各加载一份，instanceof 失效且不报错。
+import * as THREE from 'three';
 import {
   createKartState, stepKart, camHeightOf, damp,
   screenFraction, snapToTile, stepCamera,
